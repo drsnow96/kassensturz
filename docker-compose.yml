@@ -1,5 +1,5 @@
 # Kassensturz auf der Synology DS723
-# In Container Manager: Projekt → Erstellen → Pfad /volume1/docker/kassensturz → diese Datei einfügen.
+# In Container Manager: Projekt → Erstellen → Pfad /volume2/docker/kassensturz → diese Datei einfügen.
 services:
   kassensturz:
     image: ghcr.io/drsnow96/kassensturz:latest
@@ -14,7 +14,7 @@ services:
       - KEEP_BACKUPS=10
     volumes:
       # Hier liegen ALLE Daten: Datenbank, Belege, Backups. Bleibt bei Updates erhalten.
-      - /volume1/docker/kassensturz/data:/data
+      - /volume2/docker/kassensturz/data:/data
     labels:
       - com.centurylinklabs.watchtower.enable=true
 

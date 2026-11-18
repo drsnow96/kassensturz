@@ -17,7 +17,7 @@ Technik: Node.js 24, SQLite (eingebaut), keine npm-Abhängigkeiten. Ein Containe
 | Was | Ort |
 |---|---|
 | Programmcode | dieses Repo / Container-Image `ghcr.io/drsnow96/kassensturz` |
-| Datenbank, Belege, Backups | **nur** auf der NAS: `/volume1/docker/kassensturz/data` |
+| Datenbank, Belege, Backups | **nur** auf der NAS: `/volume2/docker/kassensturz/data` |
 
 Der Container ist zustandslos. Bei einem Update wird er ersetzt, der Datenordner bleibt unberührt.
 `data/`, `*.sqlite`, `*.csv` und `*.pdf` sind per `.gitignore` und `.dockerignore` ausgeschlossen.
@@ -63,7 +63,7 @@ Damit kann die NAS das Image laden, und Watchtower nutzt dieselben Zugangsdaten 
 ### 4. Projekt in Container Manager anlegen
 Container Manager → **Projekt → Erstellen**
 - Projektname: `kassensturz`
-- Pfad: `/volume1/docker/kassensturz`
+- Pfad: `/volume2/docker/kassensturz`
 - Quelle: *docker-compose.yml hochladen* (Datei aus diesem Repo)
 - Weiter → Fertig. Beide Container starten.
 
@@ -96,7 +96,7 @@ Was dabei mit den Daten passiert:
 Sofort aktualisieren statt um 04:00:
 
 ```sh
-cd /volume1/docker/kassensturz
+cd /volume2/docker/kassensturz
 sudo docker compose pull && sudo docker compose up -d
 ```
 
@@ -105,7 +105,7 @@ sudo docker compose pull && sudo docker compose up -d
 ## Backup zurückspielen
 
 ```sh
-cd /volume1/docker/kassensturz
+cd /volume2/docker/kassensturz
 sudo docker compose stop kassensturz
 cp data/kassensturz.sqlite data/kassensturz-defekt.sqlite
 cp data/backups/<backup-datei>.sqlite data/kassensturz.sqlite
