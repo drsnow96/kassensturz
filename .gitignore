@@ -10,3 +10,6 @@ belege/
 .env
 node_modules/
 .DS_Store
+
+# Importdateien mit echten Zahlen
+*import*.json

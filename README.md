@@ -2,11 +2,19 @@
 
 Budget, Angebote, Rechnungen, Belege und Finanzierung für unseren Hausbau – selbst gehostet auf der Synology DS723.
 
-- **Übersicht:** Gesamtbudget, Bezahlt, Beauftragt, Prognose, Budget-Rest, Finanzierungspuffer, Balken je Kategorie, offene Zahlungen
-- **Ausgaben:** erfassen mit Status *Option → Angebot → Beauftragt → Bezahlt*, Firma, Datum, Fälligkeit, Notiz, Belege (PDF/Fotos), Suche, Filter, CSV-Export
-- **Kategorien & Budget:** Budget je Kategorie, Gebunden / Prognose / Rest
-- **Finanzierung:** Eigenkapital, KfW, Bankdarlehen … gegen den Bedarf
-- **Einstellungen:** Konten für euch beide, Passwort ändern, Backups
+- **Übersicht:** Gesamtbudget inkl. Reserve, Bezahlt, Beauftragt, Worst Case, Finanzierungspuffer, Kosten je Bereich, Gezahlt nach Person, offene Zahlungen und Entscheidungen
+- **Kosten:** Positionen nach Bereichen (A–H) wie in der Excel-Kostenübersicht – Nr, Kostenpunkt, *Im Hauspreis? (Nein/Ja/Prüfen)*, Schätzung, Angebot/Ist, Differenz, Status *Geplant → Angebot → Beauftragt → Bezahlt* (oder *Option*), Hinweis, Info mit klickbaren Links, Belege (PDF/Fotos)
+- **Aufteilung der Zahlungen:** Standard 50:50 (in den Einstellungen änderbar), pro Position abweichend einstellbar; die Übersicht zeigt, wer wie viel gezahlt hat und die Abweichung vom Soll
+- **Bereiche & Budget:** Schätzung, Angebot/Ist, Prognose, optionaler Budgetrahmen, Reserve-Kennzeichen je Bereich
+- **Finanzierung:** Eigenkapital, KfW, Bankdarlehen … gegen Bedarf und Worst Case
+- **Einstellungen:** Reserve-Satz, Standardaufteilung, Konten, Import/Export (JSON, CSV), Backups
+
+## Rechenlogik (wie in der Excel-Kostenübersicht)
+
+- Es zählen Positionen mit *Im Hauspreis? = Nein*. *Ja* ist im Hauspreis enthalten. *Prüfen* zählt nur zum Worst Case, außer der Posten ist beauftragt oder bezahlt.
+- Je Position gilt Angebot/Ist, solange keins vorliegt die Schätzung. *Optionen* zählen nicht.
+- Reserve = Reserve-Satz × Kosten aller Bereiche mit Reserve-Haken (Standard: alle außer Hauspreis/Grundstück).
+- Gesamtbudget = Prognose + Reserve. Worst Case = Gesamtbudget + alle *Prüfen*-Posten.
 
 Technik: Node.js 24, SQLite (eingebaut), keine npm-Abhängigkeiten. Ein Container, ein Datenordner.
 
@@ -70,6 +78,11 @@ Container Manager → **Projekt → Erstellen**
 ### 5. Erstes Konto anlegen – sofort
 `http://<NAS-IP>:8099` öffnen. Solange kein Konto existiert, zeigt die App die Einrichtung.
 Dort dein Konto anlegen, danach unter **Einstellungen → Benutzer** das Konto für deine Frau.
+
+### Kostenübersicht importieren
+Einstellungen → **Import & Export** → Importdatei (`.json`) wählen → Importieren.
+Leere Standardbereiche werden dabei entfernt, ein erneuter Import aktualisiert statt zu verdoppeln, vorher entsteht automatisch ein Backup.
+Importdateien enthalten eure echten Zahlen und gehören **nicht** ins Repository.
 
 ### 6. Von unterwegs: Tailscale statt Portfreigabe
 - Paketzentrum → **Tailscale** installieren und anmelden

@@ -24,7 +24,8 @@ const SESSION_DAYS = 30;
 const MAX_JSON = 1024 * 1024;
 const MAX_UPLOAD = (Number(process.env.MAX_UPLOAD_MB) || 25) * 1024 * 1024;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const STATUSES = ['option', 'angebot', 'beauftragt', 'bezahlt'];
+const STATUSES = ['geplant', 'option', 'angebot', 'beauftragt', 'bezahlt'];
+const INCLUDED = ['nein', 'ja', 'pruefen'];
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -120,6 +121,41 @@ const MIGRATIONS = [
     ('KfW 297 Klimafreundlicher Neubau', 'bis 100.000 €, mit QNG bis 150.000 €', 20),
     ('Bankdarlehen (Hausbank)', 'Zins, Zinsbindung, Tilgung', 30);
   `,
+
+  // 2 – Kostenpositionen wie in der Excel-Kostenübersicht:
+  //     Nr, Schätzung, Angebot/Ist, „Im Hauspreis?“, Hinweis, Status „geplant“,
+  //     Aufteilung der Zahlung je Person, Reserve-Kennzeichen je Kategorie.
+  `
+  CREATE TABLE expenses_new (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    estimate REAL,
+    amount REAL,
+    status TEXT NOT NULL CHECK (status IN ('geplant','option','angebot','beauftragt','bezahlt')),
+    included TEXT NOT NULL DEFAULT 'nein' CHECK (included IN ('nein','ja','pruefen')),
+    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    vendor TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL DEFAULT '',
+    due TEXT NOT NULL DEFAULT '',
+    hint TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    split TEXT,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO expenses_new (id, title, amount, status, category_id, vendor, date, due, note, created_by, created_at, updated_by, updated_at)
+    SELECT id, title, amount, status, category_id, vendor, date, due, note, created_by, created_at, updated_by, updated_at FROM expenses;
+  DROP TABLE expenses;
+  ALTER TABLE expenses_new RENAME TO expenses;
+  CREATE INDEX idx_expenses_category ON expenses(category_id);
+
+  ALTER TABLE categories ADD COLUMN reserve INTEGER NOT NULL DEFAULT 1;
+  UPDATE categories SET reserve = 0 WHERE name LIKE 'Grundstück%' OR name LIKE 'Haus (%' OR name LIKE 'Reserve%';
+  INSERT INTO meta (key, value) VALUES ('reserve_rate', '0.1') ON CONFLICT(key) DO NOTHING;
+  `,
 ];
 
 function stamp() {
@@ -158,26 +194,33 @@ function setMeta(key, value) {
 
 function migrate() {
   const current = db.prepare('PRAGMA user_version').get().user_version;
-  const target = MIGRATIONS.length;
-  if (current > target) {
+  // KS_TARGET_MIGRATION nur für Tests (Datenbank auf älterem Stand erzeugen)
+  const target = Math.min(MIGRATIONS.length, Number(process.env.KS_TARGET_MIGRATION) || MIGRATIONS.length);
+  if (current > MIGRATIONS.length) {
     throw new Error(`Datenbank-Version ${current} ist neuer als diese App (${target}). Bitte neueres Image verwenden.`);
   }
   const lastVersion = current > 0 ? getMeta('app_version') : null;
   if (dbExisted && current > 0 && (current < target || lastVersion !== VERSION)) {
     backup(`vor-v${VERSION}`);
   }
+  // Fremdschlüssel während Tabellen-Umbauten aus (geht nur außerhalb einer Transaktion)
+  db.exec('PRAGMA foreign_keys = OFF');
   for (let v = current; v < target; v++) {
     db.exec('BEGIN');
     try {
       db.exec(MIGRATIONS[v]);
+      const broken = db.prepare('PRAGMA foreign_key_check').all();
+      if (broken.length) throw new Error('Fremdschlüssel nach Migration verletzt: ' + JSON.stringify(broken.slice(0, 3)));
       db.exec(`PRAGMA user_version = ${v + 1}`);
       db.exec('COMMIT');
       log(`Migration ${v + 1} angewendet`);
     } catch (e) {
       db.exec('ROLLBACK');
+      db.exec('PRAGMA foreign_keys = ON');
       throw e;
     }
   }
+  db.exec('PRAGMA foreign_keys = ON');
   setMeta('app_version', VERSION);
 }
 migrate();
@@ -331,6 +374,15 @@ function validateUsername(u) {
 // ---------------------------------------------------------------------------
 // Daten lesen
 // ---------------------------------------------------------------------------
+function settings() {
+  let split = null;
+  try { split = JSON.parse(getMeta('default_split') || 'null'); } catch { split = null; }
+  return {
+    reserve_rate: Number(getMeta('reserve_rate') ?? 0.1),
+    default_split: split && typeof split === 'object' ? split : null,
+  };
+}
+
 function state(user) {
   const attachments = db.prepare('SELECT id, expense_id, filename, mime, size, uploaded_by, uploaded_at FROM attachments ORDER BY id').all();
   const byExpense = new Map();
@@ -338,12 +390,17 @@ function state(user) {
     if (!byExpense.has(a.expense_id)) byExpense.set(a.expense_id, []);
     byExpense.get(a.expense_id).push(a);
   }
-  const expenses = db.prepare('SELECT * FROM expenses ORDER BY date DESC, id DESC').all()
-    .map((e) => ({ ...e, attachments: byExpense.get(e.id) || [] }));
+  const expenses = db.prepare('SELECT * FROM expenses ORDER BY id').all()
+    .map((e) => {
+      let split = null;
+      try { split = e.split ? JSON.parse(e.split) : null; } catch { split = null; }
+      return { ...e, split, attachments: byExpense.get(e.id) || [] };
+    });
   return {
     rev,
     version: VERSION,
     me: user,
+    settings: settings(),
     users: db.prepare('SELECT id, username, display_name FROM users ORDER BY id').all(),
     categories: db.prepare('SELECT * FROM categories ORDER BY sort, id').all(),
     expenses,
@@ -351,34 +408,145 @@ function state(user) {
   };
 }
 
+function optAmount(v) {
+  if (v === '' || v == null) return null;
+  return amount(v);
+}
+
+/** Aufteilung {userId: Prozent} prüfen; null = Standardaufteilung */
+function splitFromBody(v) {
+  if (v == null || v === '') return null;
+  if (typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, 'Ungültige Aufteilung');
+  const out = {}; let sum = 0;
+  for (const [k, raw] of Object.entries(v)) {
+    const id = Number(k); const pct = Number(raw);
+    if (!Number.isInteger(id) || !Number.isFinite(pct) || pct < 0 || pct > 100) throw new HttpError(400, 'Ungültige Aufteilung');
+    if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) continue;
+    out[id] = Math.round(pct * 100) / 100; sum += out[id];
+  }
+  if (!Object.keys(out).length) return null;
+  if (Math.abs(sum - 100) > 0.5) throw new HttpError(400, 'Die Aufteilung muss zusammen 100 % ergeben');
+  return out;
+}
+
 function expenseFromBody(b) {
   const title = str(b.title, 200);
   if (!title) throw new HttpError(400, 'Bezeichnung fehlt');
-  const status = STATUSES.includes(b.status) ? b.status : 'bezahlt';
+  const status = STATUSES.includes(b.status) ? b.status : 'geplant';
+  const included = INCLUDED.includes(b.included) ? b.included : 'nein';
   let category = b.category_id == null || b.category_id === '' ? null : Number(b.category_id);
   if (category != null && !db.prepare('SELECT 1 FROM categories WHERE id = ?').get(category)) category = null;
-  return {
-    title, status, category,
-    amount: amount(b.amount),
-    vendor: str(b.vendor, 200), date: date(b.date), due: date(b.due), note: str(b.note, 2000),
+  const e = {
+    code: str(b.code, 20), title, status, included, category,
+    estimate: optAmount(b.estimate), amount: optAmount(b.amount),
+    vendor: str(b.vendor, 200), date: date(b.date), due: date(b.due),
+    hint: str(b.hint, 2000), note: str(b.note, 4000),
+    split: splitFromBody(b.split),
   };
+  if (e.estimate == null && e.amount == null) throw new HttpError(400, 'Bitte Schätzung oder Angebot/Ist angeben');
+  return e;
+}
+
+const EXPENSE_COLS = ['code', 'title', 'estimate', 'amount', 'status', 'included', 'category_id', 'vendor', 'date', 'due', 'hint', 'note', 'split'];
+const expenseValues = (e) => [e.code, e.title, e.estimate, e.amount, e.status, e.included, e.category, e.vendor, e.date, e.due, e.hint, e.note,
+  e.split ? JSON.stringify(e.split) : null];
+
+function insertExpense(e, userId) {
+  const t = nowIso();
+  const r = db.prepare(`INSERT INTO expenses (${EXPENSE_COLS.join(', ')}, created_by, created_at, updated_by, updated_at)
+                        VALUES (${EXPENSE_COLS.map(() => '?').join(', ')}, ?, ?, ?, ?)`)
+    .run(...expenseValues(e), userId, t, userId, t);
+  return Number(r.lastInsertRowid);
+}
+function updateExpense(id, e, userId) {
+  db.prepare(`UPDATE expenses SET ${EXPENSE_COLS.map((c) => c + ' = ?').join(', ')}, updated_by = ?, updated_at = ? WHERE id = ?`)
+    .run(...expenseValues(e), userId, nowIso(), id);
 }
 
 function removeAttachmentFile(stored) {
   try { fs.unlinkSync(path.join(FILES_DIR, path.basename(stored))); } catch { /* bereits weg */ }
 }
 
+const STATUS_LABEL = { geplant: 'Geplant', option: 'Option', angebot: 'Angebot', beauftragt: 'Beauftragt', bezahlt: 'Bezahlt' };
+const INCLUDED_LABEL = { nein: 'Nein', ja: 'Ja', pruefen: 'Prüfen' };
+
 function csvExport() {
   const q = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const n = (v) => (v == null ? '' : Number(v).toFixed(2).replace('.', ','));
   const d = (s) => (s && s.length === 10 ? `${s.slice(8, 10)}.${s.slice(5, 7)}.${s.slice(0, 4)}` : '');
-  const labels = { option: 'Option', angebot: 'Angebot', beauftragt: 'Beauftragt', bezahlt: 'Bezahlt' };
   const rows = db.prepare(`SELECT e.*, c.name AS category_name FROM expenses e LEFT JOIN categories c ON c.id = e.category_id
-                           ORDER BY e.date, e.id`).all();
-  const lines = [['Datum', 'Bezeichnung', 'Firma', 'Kategorie', 'Status', 'Betrag', 'Fällig', 'Notiz'].map(q).join(';')];
+                           ORDER BY c.sort, e.code, e.id`).all();
+  const lines = [['Kategorie', 'Nr', 'Kostenpunkt', 'Im Hauspreis?', 'Schätzung', 'Angebot/Ist', 'Status', 'Firma', 'Datum', 'Fällig', 'Hinweis', 'Info'].map(q).join(';')];
   for (const e of rows) {
-    lines.push([d(e.date), e.title, e.vendor, e.category_name || 'Ohne Kategorie', labels[e.status], e.amount.toFixed(2).replace('.', ','), d(e.due), e.note].map(q).join(';'));
+    lines.push([e.category_name || 'Ohne Kategorie', e.code, e.title, INCLUDED_LABEL[e.included], n(e.estimate), n(e.amount),
+      STATUS_LABEL[e.status], e.vendor, d(e.date), d(e.due), e.hint, e.note].map(q).join(';'));
   }
-  return '\ufeff' + lines.join('\r\n') + '\r\n';
+  return '﻿' + lines.join('\r\n') + '\r\n';
+}
+
+/**
+ * Import im Format {format: "kassensturz-import", version: 1, settings, categories, positions}.
+ * Kategorien werden über den Namen zugeordnet, Positionen über Kategorie + Nr + Kostenpunkt
+ * (erneuter Import aktualisiert statt zu verdoppeln).
+ */
+function importData(b, userId) {
+  if (b.format !== 'kassensturz-import') throw new HttpError(400, 'Unbekanntes Dateiformat');
+  const cats = Array.isArray(b.categories) ? b.categories : [];
+  const pos = Array.isArray(b.positions) ? b.positions : [];
+  if (pos.length > 5000 || cats.length > 200) throw new HttpError(400, 'Import zu groß');
+  const result = { categories_created: 0, categories_removed: 0, positions_created: 0, positions_updated: 0 };
+  db.exec('BEGIN');
+  try {
+    if (b.replace_empty_categories) {
+      result.categories_removed = Number(db.prepare(`DELETE FROM categories WHERE id NOT IN
+        (SELECT category_id FROM expenses WHERE category_id IS NOT NULL)`).run().changes);
+    }
+    const keyToId = new Map();
+    for (const c of cats) {
+      const name = str(c.name, 120);
+      if (!name) continue;
+      let row = db.prepare('SELECT id FROM categories WHERE name = ?').get(name);
+      if (row) {
+        db.prepare('UPDATE categories SET sort = ?, reserve = ? WHERE id = ?').run(Math.trunc(Number(c.sort)) || 0, c.reserve === false ? 0 : 1, row.id);
+      } else {
+        const r = db.prepare('INSERT INTO categories (name, budget, sort, reserve) VALUES (?, ?, ?, ?)')
+          .run(name, amount(c.budget, false), Math.trunc(Number(c.sort)) || 0, c.reserve === false ? 0 : 1);
+        row = { id: Number(r.lastInsertRowid) };
+        result.categories_created += 1;
+      }
+      keyToId.set(String(c.key ?? name), row.id);
+    }
+    for (const p of pos) {
+      const catId = keyToId.get(String(p.category)) ?? null;
+      const e = expenseFromBody({ ...p, category_id: catId, split: null });
+      const existing = db.prepare('SELECT id FROM expenses WHERE code = ? AND title = ? AND category_id IS ?').get(e.code, e.title, catId);
+      if (existing) { updateExpense(existing.id, e, userId); result.positions_updated += 1; }
+      else { insertExpense(e, userId); result.positions_created += 1; }
+    }
+    if (b.settings && b.settings.reserve_rate != null) {
+      const rr = Number(b.settings.reserve_rate);
+      if (Number.isFinite(rr) && rr >= 0 && rr <= 1) setMeta('reserve_rate', rr);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return result;
+}
+
+function jsonExport() {
+  const cats = db.prepare('SELECT * FROM categories ORDER BY sort, id').all();
+  return {
+    format: 'kassensturz-import', version: 1, exported_at: nowIso(), app_version: VERSION,
+    settings: { reserve_rate: settings().reserve_rate },
+    categories: cats.map((c) => ({ key: String(c.id), name: c.name, sort: c.sort, budget: c.budget, reserve: !!c.reserve })),
+    positions: db.prepare('SELECT * FROM expenses ORDER BY id').all().map((e) => ({
+      category: e.category_id == null ? null : String(e.category_id), code: e.code, title: e.title, estimate: e.estimate, amount: e.amount,
+      status: e.status, included: e.included, vendor: e.vendor, date: e.date, due: e.due, hint: e.hint, note: e.note,
+    })),
+    sources: db.prepare('SELECT name, amount, note FROM sources ORDER BY sort, id').all(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +628,8 @@ async function api(req, res, url) {
       if (!name) throw new HttpError(400, 'Name fehlt');
       const budget = b.budget !== undefined ? amount(b.budget, false) : cat.budget;
       const sort = b.sort !== undefined ? Math.trunc(Number(b.sort)) || 0 : cat.sort;
-      db.prepare('UPDATE categories SET name = ?, budget = ?, sort = ? WHERE id = ?').run(name, budget, sort, id);
+      const reserve = b.reserve !== undefined ? (b.reserve ? 1 : 0) : cat.reserve;
+      db.prepare('UPDATE categories SET name = ?, budget = ?, sort = ?, reserve = ? WHERE id = ?').run(name, budget, sort, reserve, id);
       bump();
       return send(res, 200, { ok: true });
     }
@@ -473,22 +642,15 @@ async function api(req, res, url) {
 
   // Ausgaben
   if (p === '/api/expenses' && m === 'POST') {
-    const e = expenseFromBody(await readJson(req));
-    const t = nowIso();
-    const r = db.prepare(`INSERT INTO expenses (title, amount, status, category_id, vendor, date, due, note, created_by, created_at, updated_by, updated_at)
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(e.title, e.amount, e.status, e.category, e.vendor, e.date, e.due, e.note, user.id, t, user.id, t);
+    const id = insertExpense(expenseFromBody(await readJson(req)), user.id);
     bump();
-    return send(res, 200, { id: Number(r.lastInsertRowid) });
+    return send(res, 200, { id });
   }
   if ((mm = p.match(/^\/api\/expenses\/(\d+)$/))) {
     const id = idParam(mm[1]);
     if (!db.prepare('SELECT 1 FROM expenses WHERE id = ?').get(id)) throw new HttpError(404, 'Ausgabe nicht gefunden');
     if (m === 'PUT') {
-      const e = expenseFromBody(await readJson(req));
-      db.prepare(`UPDATE expenses SET title = ?, amount = ?, status = ?, category_id = ?, vendor = ?, date = ?, due = ?, note = ?,
-                  updated_by = ?, updated_at = ? WHERE id = ?`)
-        .run(e.title, e.amount, e.status, e.category, e.vendor, e.date, e.due, e.note, user.id, nowIso(), id);
+      updateExpense(id, expenseFromBody(await readJson(req)), user.id);
       bump();
       return send(res, 200, { ok: true });
     }
@@ -621,6 +783,40 @@ async function api(req, res, url) {
     }
     bump();
     return send(res, 200, { ok: true });
+  }
+
+  // Einstellungen: Reserve-Satz und Standardaufteilung der Zahlungen
+  if (p === '/api/settings' && m === 'PUT') {
+    const b = await readJson(req);
+    if (b.reserve_rate !== undefined) {
+      const rr = Number(b.reserve_rate);
+      if (!Number.isFinite(rr) || rr < 0 || rr > 1) throw new HttpError(400, 'Reserve-Satz muss zwischen 0 und 100 % liegen');
+      setMeta('reserve_rate', rr);
+    }
+    if (b.default_split !== undefined) {
+      const sp = splitFromBody(b.default_split);
+      setMeta('default_split', sp ? JSON.stringify(sp) : 'null');
+    }
+    bump();
+    return send(res, 200, { ok: true });
+  }
+
+  // Import / Export (JSON)
+  if (p === '/api/import' && m === 'POST') {
+    const buf = await readBody(req, 5 * 1024 * 1024);
+    let b;
+    try { b = JSON.parse(buf.toString('utf8')); } catch { throw new HttpError(400, 'Datei ist kein gültiges JSON'); }
+    backup('vor-import');
+    const r = importData(b, user.id);
+    log(`Import durch ${user.username}: ${JSON.stringify(r)}`);
+    bump();
+    return send(res, 200, r);
+  }
+  if (p === '/api/export.json' && m === 'GET') {
+    return send(res, 200, JSON.stringify(jsonExport(), null, 2), {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="kassensturz-${new Date().toISOString().slice(0, 10)}.json"`,
+    });
   }
 
   // Backups

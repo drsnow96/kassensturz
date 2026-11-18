@@ -92,3 +92,16 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .settings{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
 .settings form{display:flex;flex-direction:column;gap:10px}
 .settings label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);font-weight:500}
+.s-geplant{background:transparent;border:1px solid var(--line);color:var(--muted)}
+.s-pruefen,.i-pruefen{background:transparent;border:1px dashed var(--warn);color:var(--warn)}
+.i-nein{background:var(--bg);color:var(--ink)}
+.i-ja{background:transparent;color:var(--muted);border:1px solid var(--line)}
+table.costs tr.dim td{opacity:.55}
+table.costs tr.group td{background:var(--bg);font-weight:600;font-size:13px;padding-top:12px}
+table.costs tr.sub td{font-weight:600;font-size:12px;color:var(--muted);border-bottom:2px solid var(--line)}
+table.costs td:nth-child(2){min-width:260px}
+.info{color:var(--muted);overflow-wrap:anywhere}
+.info a{color:var(--paid)}
+.splitbox{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0}
+.splitbox .full{grid-column:1/-1;width:100%}
+.splitbox label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);font-weight:500}
