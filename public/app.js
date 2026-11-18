@@ -24,6 +24,13 @@
   let tab = 'uebersicht';
   const filt = { q: '', cat: '', st: '', inc: '' };
   let pendingRender = false;
+  let filtOpen = false;
+
+  // Layout: Handy (schmal) oder PC – wird live umgeschaltet, z. B. beim Drehen des Tablets
+  const mq = window.matchMedia('(max-width: 760px)');
+  let mobile = mq.matches;
+  document.body.classList.toggle('mobile', mobile);
+  mq.addEventListener('change', () => { mobile = mq.matches; document.body.classList.toggle('mobile', mobile); render(); });
 
   const $ = (s) => document.querySelector(s);
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -223,9 +230,9 @@
     pendingRender = false;
     document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
     const v = $('#view');
-    if (tab === 'kosten') v.innerHTML = viewCosts();
-    else if (tab === 'budget') v.innerHTML = viewBudget();
-    else if (tab === 'finanzierung') v.innerHTML = viewFinance();
+    if (tab === 'kosten') v.innerHTML = mobile ? viewCostsMobile() : viewCosts();
+    else if (tab === 'budget') v.innerHTML = mobile ? viewBudgetMobile() : viewBudget();
+    else if (tab === 'finanzierung') v.innerHTML = mobile ? viewFinanceMobile() : viewFinance();
     else if (tab === 'einstellungen') { v.innerHTML = viewSettings(); loadBackups(); }
     else v.innerHTML = viewOverview();
   }
@@ -424,6 +431,138 @@
     return html;
   }
 
+
+  // ---------- Mobile Ansichten ----------
+  function filterBar() {
+    const active = [filt.cat, filt.inc, filt.st].filter(Boolean).length;
+    const catOpts = S.categories.map((c) => `<option value="${c.id}" ${filt.cat === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    return `<div class="toolbar">
+        <input id="fq" type="search" placeholder="Suchen …" value="${esc(filt.q)}">
+        <button id="filtToggle" ${active ? 'class="primary"' : ''}>Filter${active ? ' (' + active + ')' : ''}</button>
+      </div>
+      ${filtOpen ? `<div class="filterpanel">
+        <select id="fcat"><option value="">Alle Bereiche</option>${catOpts}<option value="${NOCAT}" ${filt.cat === NOCAT ? 'selected' : ''}>Ohne Kategorie</option></select>
+        <select id="finc"><option value="">Im Hauspreis: alle</option>${INCL.map((x) => `<option value="${x.k}" ${filt.inc === x.k ? 'selected' : ''}>Im Hauspreis: ${x.l}</option>`).join('')}</select>
+        <select id="fst"><option value="">Alle Status</option>${STATUS.map((x) => `<option value="${x.k}" ${filt.st === x.k ? 'selected' : ''}>${x.l}</option>`).join('')}</select>
+        ${active ? '<button id="filtReset">Filter zurücksetzen</button>' : ''}
+      </div>` : ''}`;
+  }
+
+  function costCard(e) {
+    const diff = has(e.amount) && has(e.estimate) ? num(e.amount) - num(e.estimate) : null;
+    return `<div class="mcard click${counts(e) ? '' : ' dim'}" data-edit="${e.id}">
+      <div class="top"><span class="code">${esc(e.code)}</span><span class="ttl">${esc(e.title)}</span>${e.attachments.length ? `<span class="clip">📎 ${e.attachments.length}</span>` : ''}</div>
+      ${e.hint ? `<div class="hint">${esc(e.hint)}</div>` : ''}
+      <div class="chips"><span class="chip s-${esc(e.status)}">${SL[e.status] || esc(e.status)}</span><span class="chip i-${e.included}">Im Hauspreis: ${IL[e.included]}</span>
+        ${e.status === 'beauftragt' && e.due ? `<span class="small muted">fällig ${fdate(e.due)}</span>` : ''}</div>
+      <div class="amts">
+        <div><small>Schätzung</small>${has(e.estimate) ? fmt0.format(num(e.estimate)) : '–'}</div>
+        <div><small>Angebot / Ist</small>${has(e.amount) ? fmt0.format(num(e.amount)) : '–'}</div>
+        <div><small>Differenz</small><span class="${diff > 0 ? 'neg' : diff < 0 ? 'pos' : ''}">${diff ? (diff > 0 ? '+' : '') + fmt0.format(diff) : '–'}</span></div>
+      </div>
+    </div>`;
+  }
+
+  function viewCostsMobile() {
+    let html = filterBar();
+    const groups = S.categories.map((c) => ({ id: c.id, name: c.name, items: S.expenses.filter((e) => e.category_id === c.id) }));
+    const orphan = S.expenses.filter((e) => !catOf(e.category_id));
+    if (orphan.length) groups.push({ id: NOCAT, name: 'Ohne Kategorie', items: orphan });
+    const searching = filt.q || filt.cat || filt.inc || filt.st;
+    let any = false; const all = [];
+    groups.forEach((g) => {
+      const items = g.items.filter(matches).sort(byCode);
+      if (!items.length) return;
+      any = true; all.push(...items);
+      const t = totals(items);
+      const open = searching || openGroups.has(String(g.id));
+      html += `<details class="mgroup" data-group="${g.id}" ${open ? 'open' : ''}><summary><span class="nm">${esc(g.name)} <span class="cnt">${items.length}</span></span><span class="sum">${fmt0.format(t.prognose)}</span></summary>
+        ${items.map(costCard).join('')}</details>`;
+    });
+    if (!any) html += `<div class="empty">${S.expenses.length ? 'Keine Treffer für diesen Filter.' : 'Noch keine Positionen. Lege eine an oder importiere eure Kostenübersicht unter „Mehr“.'}</div>`;
+    else {
+      const t = totals(all);
+      html += `<div class="card">
+        <div class="mtotal"><span>Prognose</span><span>${fmt0.format(t.prognose)}</span></div>
+        <div class="mtotal"><span>Reserve ${rr()}</span><span>${fmt0.format(t.reserve)}</span></div>
+        <div class="mtotal b"><span>Gesamtbudget</span><span>${fmt0.format(t.gesamt)}</span></div>
+        <div class="mtotal muted"><span>„Prüfen“, nicht enthalten</span><span>${fmt0.format(t.pruefen)}</span></div>
+      </div>`;
+    }
+    return html + `<button class="fab" id="addExp" aria-label="Position anlegen">+</button>`;
+  }
+  const openGroups = new Set();
+  document.addEventListener('toggle', (ev) => {
+    const d = ev.target;
+    if (d.classList && d.classList.contains('mgroup')) { if (d.open) openGroups.add(d.dataset.group); else openGroups.delete(d.dataset.group); }
+  }, true);
+
+  function viewBudgetMobile() {
+    const rows = catStats();
+    const t = totals(S.expenses);
+    let html = `<div class="muted small" style="margin-bottom:10px">Schätzung aus den Positionen, optional ein eigener Budgetrahmen. Änderungen werden beim Verlassen des Feldes gespeichert.</div><div data-live>`;
+    rows.forEach((r) => {
+      const ref = r.budget || r.schaetzung;
+      const rest = ref - r.prognose;
+      const stats = `<div class="mstats">
+          <div><small>Schätzung</small>${fmt0.format(r.schaetzung)}</div>
+          <div><small>Angebot / Ist</small>${r.ist ? fmt0.format(r.ist) : '–'}</div>
+          <div><small>Prognose</small>${fmt0.format(r.prognose)}</div>
+          <div><small>Rest</small><span class="${rest < -0.5 ? 'neg' : ''}">${ref ? fmt0.format(rest) : '–'}</span></div>
+        </div>`;
+      if (r.id === NOCAT) { html += `<div class="mcard"><div class="ttl muted">Ohne Kategorie</div>${stats}</div>`; return; }
+      html += `<div class="mcard">
+        <input data-cat="${r.id}" data-f="name" value="${esc(r.name)}" style="width:100%;font-weight:600">
+        ${stats}
+        <label class="mfield">Budgetrahmen (optional)<input data-cat="${r.id}" data-f="budget" inputmode="decimal" value="${esc(r.budget ? amtInput(r.budget) : '')}" placeholder="optional"></label>
+        <div class="mrow" style="margin-top:10px">
+          <label class="mrow small muted" style="flex:1"><input type="checkbox" data-cat="${r.id}" data-f="reserve" ${r.reserve ? 'checked' : ''} style="width:22px;height:22px;min-height:0"> Reserve einrechnen</label>
+          <button class="iconbtn" data-delcat="${r.id}" title="Bereich löschen">Löschen</button>
+        </div>
+      </div>`;
+    });
+    html += `</div><button class="primary" id="addCat" style="width:100%">+ Bereich</button>
+      <div class="err" id="catErr"></div>
+      <div class="card" style="margin-top:12px">
+        <div class="mtotal"><span>Prognose</span><span>${fmt0.format(t.prognose)}</span></div>
+        <div class="mtotal"><span>Reserve ${rr()}</span><span>${fmt0.format(t.reserve)}</span></div>
+        <div class="mtotal b"><span>Gesamtbudget</span><span>${fmt0.format(t.gesamt)}</span></div>
+      </div>`;
+    return html;
+  }
+
+  function viewFinanceMobile() {
+    const ft = finTotal();
+    const t = totals(S.expenses);
+    const gap = ft - t.gesamt;
+    const maxv = Math.max(ft, t.worst, 1);
+    let html = `<div class="grid kpis">
+      ${kpi('Finanzierung', fmt0.format(ft))}
+      ${kpi('Bedarf', fmt0.format(t.gesamt), 'inkl. Reserve')}
+      ${kpi(gap < 0 ? 'Lücke' : 'Puffer', fmt0.format(Math.abs(gap)), '', gap < 0 ? 'neg' : 'pos')}
+      ${kpi('Puffer Worst Case', fmt0.format(ft - t.worst), '', ft - t.worst < 0 ? 'neg' : 'pos')}
+    </div>
+    <div class="card" style="margin-top:10px">
+      <div class="small muted">Finanzierung</div><div class="finbar"><div style="width:${((ft / maxv) * 100).toFixed(1)}%;background:var(--paid)"></div></div>
+      <div class="small muted">Bedarf</div><div class="finbar"><div style="width:${((t.gesamt / maxv) * 100).toFixed(1)}%;background:var(--comm)"></div></div>
+      <div class="small muted">Worst Case</div><div class="finbar"><div style="width:${((t.worst / maxv) * 100).toFixed(1)}%;background:var(--offer)"></div></div>
+    </div>
+    <h2 style="margin:16px 2px 8px">Finanzierungsbausteine</h2><div data-live>`;
+    S.sources.forEach((src) => {
+      html += `<div class="mcard">
+        <input data-src="${src.id}" data-f="name" value="${esc(src.name)}" style="width:100%;font-weight:600">
+        <label class="mfield">Betrag (€)<input data-src="${src.id}" data-f="amount" inputmode="decimal" value="${esc(src.amount ? amtInput(src.amount) : '')}" placeholder="0"></label>
+        <label class="mfield">Notiz (Zins, Laufzeit, Bank …)<input data-src="${src.id}" data-f="note" value="${esc(src.note || '')}"></label>
+        <div class="mrow" style="margin-top:10px;justify-content:flex-end"><button class="iconbtn" data-delsrc="${src.id}">Entfernen</button></div>
+      </div>`;
+    });
+    html += `</div><button class="primary" id="addSrc" style="width:100%">+ Baustein</button>
+      <div class="err" id="finErr"></div>
+      <div class="card" style="margin-top:12px"><div class="mtotal b" style="border:0;margin:0;padding:0"><span>Summe</span><span>${fmt0.format(ft)}</span></div></div>
+      <div class="note"><b>KfW 297:</b> Kredit bis 100.000 € je Wohneinheit, mit QNG-Siegel bis 150.000 €. Aktuelle Konditionen bei der Hausbank bzw. auf kfw.de/297 prüfen.</div>`;
+    return html;
+  }
+
   function splitInputs(sp, prefix) {
     if (S.users.length < 2) return `<div class="muted small">Sobald ein zweites Konto angelegt ist, kannst du hier die Aufteilung festlegen.</div>`;
     return `<div class="splitbox">${S.users.map((u, i) => `<label>${esc(u.display_name)} (%)<input type="number" min="0" max="100" step="1" data-split="${prefix}" data-uid="${u.id}" data-idx="${i}" value="${Math.round(num(sp[u.id]) * 100) / 100}"></label>`).join('')}
@@ -514,13 +653,13 @@
     openModal(`<h2>${e ? 'Position bearbeiten' : 'Position anlegen'}</h2>
       <form id="expForm" class="form">
         <label>Nr<input name="code" value="${esc(d.code || '')}" placeholder="z. B. A18"></label>
-        <label>Bereich<select name="category_id"><option value="">Ohne Kategorie</option>${S.categories.map((c) => `<option value="${c.id}" ${d.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+        <label class="wide">Bereich<select name="category_id"><option value="">Ohne Kategorie</option>${S.categories.map((c) => `<option value="${c.id}" ${d.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
         <label class="full">Kostenpunkt *<input name="title" required value="${esc(d.title || '')}"></label>
-        <label>Im Hauspreis?<select name="included">${INCL.map((s) => `<option value="${s.k}" ${d.included === s.k ? 'selected' : ''}>${s.l} – ${s.h}</option>`).join('')}</select></label>
-        <label>Status<select name="status">${STATUS.map((s) => `<option value="${s.k}" ${d.status === s.k ? 'selected' : ''}>${s.l} – ${s.h}</option>`).join('')}</select></label>
+        <label class="wide">Im Hauspreis?<select name="included">${INCL.map((s) => `<option value="${s.k}" ${d.included === s.k ? 'selected' : ''}>${s.l} – ${s.h}</option>`).join('')}</select></label>
+        <label class="wide">Status<select name="status">${STATUS.map((s) => `<option value="${s.k}" ${d.status === s.k ? 'selected' : ''}>${s.l} – ${s.h}</option>`).join('')}</select></label>
         <label>Schätzung (€)<input name="estimate" inputmode="decimal" value="${esc(amtInput(d.estimate))}" placeholder="z. B. 5.000"></label>
         <label>Angebot / Ist (€)<input name="amount" inputmode="decimal" value="${esc(amtInput(d.amount))}" placeholder="leer = noch keins"></label>
-        <label>Firma / Anbieter<input name="vendor" value="${esc(d.vendor || '')}"></label>
+        <label class="wide">Firma / Anbieter<input name="vendor" value="${esc(d.vendor || '')}"></label>
         <label>Datum<input type="date" name="date" value="${esc(d.date || '')}"></label>
         <label>Fällig am<input type="date" name="due" value="${esc(d.due || '')}"></label>
         <label class="full">Hinweis<textarea name="hint" rows="2">${esc(d.hint || '')}</textarea></label>
@@ -607,6 +746,8 @@
     const row = t.closest('[data-edit]'); if (row) { expenseDialog(Number(row.dataset.edit)); return; }
     try {
       if (t.id === 'addExp') { expenseDialog(null); return; }
+      if (t.id === 'filtToggle') { filtOpen = !filtOpen; render(); return; }
+      if (t.id === 'filtReset') { filt.cat = ''; filt.inc = ''; filt.st = ''; render(); return; }
       if (t.id === 'addCat') { await mutate('POST', '/api/categories', { name: 'Neuer Bereich', budget: 0 }); return; }
       if (t.id === 'addSrc') { await mutate('POST', '/api/sources', { name: 'Neuer Baustein', amount: 0 }); return; }
       if (t.dataset.delcat) {
