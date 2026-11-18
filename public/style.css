@@ -228,3 +228,37 @@ body.mobile .seg button{min-height:40px;padding:6px 14px}
 .srccard .mrow > input{min-width:0;width:auto}
 .srccard{min-width:0}
 .mcard .strong{font-weight:700;font-variant-numeric:tabular-nums}
+
+/* ---------- Wer hat wie viel ausgegeben ---------- */
+.sharebar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--bg);margin:2px 0 12px}
+.sharebar div{height:100%}
+.persongrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.person{border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.phead{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.phead i{width:10px;height:10px;border-radius:3px;flex:none;align-self:center}
+.phead .ttl{flex:1;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.phead .strong{font-size:17px}
+.pline{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px;font-variant-numeric:tabular-nums}
+.pline span:last-child{white-space:nowrap}
+.psep{border-top:1px solid var(--line);margin:6px 0}
+.strong{font-weight:700;font-variant-numeric:tabular-nums}
+
+/* ---------- Finanzierungsbausteine als Liste ---------- */
+.k-eigen{background:var(--bg);color:var(--ink)}
+.k-darlehen{background:var(--comm);color:#fff}
+.k-sonstig{background:transparent;border:1px solid var(--line);color:var(--muted)}
+.srctable td{vertical-align:middle}
+.srctable tr.detail > td{background:var(--bg);padding:12px 14px}
+.srctable tr.detail .loanstats{border-top:0;margin-top:0;padding-top:0}
+.nowrap{white-space:nowrap}
+.nowrap .iconbtn + .iconbtn{margin-left:4px}
+.loanbox .loanstats{border-top:0;margin-top:4px;padding-top:0}
+.mcard .loanbox{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.linkbtn{border:0;background:transparent;color:var(--paid);padding:8px 0 0;font-size:13px}
+#loanPreview{background:var(--bg);border-radius:10px;padding:10px 12px}
+#loanPreview:empty{display:none}
+#kindSeg button{padding:8px 14px}
+body.mobile #kindSeg{width:100%;display:flex}
+body.mobile #kindSeg button{flex:1}
+.form label.mrow{flex-direction:row;align-items:center;gap:8px}
+.form input[type=checkbox], .settings input[type=checkbox]{width:auto;flex:none}
