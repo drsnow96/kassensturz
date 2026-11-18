@@ -68,14 +68,14 @@ Container Manager → **Projekt → Erstellen**
 - Weiter → Fertig. Beide Container starten.
 
 ### 5. Erstes Konto anlegen – sofort
-`http://<NAS-IP>:8090` öffnen. Solange kein Konto existiert, zeigt die App die Einrichtung.
+`http://<NAS-IP>:8099` öffnen. Solange kein Konto existiert, zeigt die App die Einrichtung.
 Dort dein Konto anlegen, danach unter **Einstellungen → Benutzer** das Konto für deine Frau.
 
 ### 6. Von unterwegs: Tailscale statt Portfreigabe
 - Paketzentrum → **Tailscale** installieren und anmelden
 - Tailscale-App auf euren Handys/Laptops, gleiches Konto bzw. Einladung
-- Aufruf: `http://ds723:8090` (MagicDNS)
-- Optional HTTPS mit gültigem Zertifikat: per SSH `sudo tailscale serve --bg 8090` → `https://ds723.<tailnet>.ts.net`
+- Aufruf: `http://ds723:8099` (MagicDNS)
+- Optional HTTPS mit gültigem Zertifikat: per SSH `sudo tailscale serve --bg 8099` → `https://ds723.<tailnet>.ts.net`
 - **Keine** Portweiterleitung im Router einrichten.
 
 ### 7. Backup außer Haus
