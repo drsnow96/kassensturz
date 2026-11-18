@@ -99,7 +99,7 @@ Hyper Backup → Ordner `docker/kassensturz/data` aufnehmen, **clientseitige Ver
 ## Updates
 
 Ich (bzw. Claude) pushe auf `main` → GitHub Actions testet und baut `ghcr.io/drsnow96/kassensturz:latest`.
-Watchtower prüft täglich um 04:00 Uhr, lädt die neue Version und tauscht den Container aus.
+Watchtower prüft alle 10 Minuten, lädt eine neue Version und tauscht den Container aus (Unterbrechung wenige Sekunden).
 
 Was dabei mit den Daten passiert:
 1. Beim Start erkennt die App die neue Version und legt **vorher** ein Backup an (`backups/kassensturz-…-vor-v1.1.0.sqlite`).

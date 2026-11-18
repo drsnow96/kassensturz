@@ -27,7 +27,7 @@ services:
       - TZ=Europe/Berlin
       - WATCHTOWER_LABEL_ENABLE=true      # nur Container mit Label aktualisieren
       - WATCHTOWER_CLEANUP=true           # alte Images aufräumen
-      - WATCHTOWER_SCHEDULE=0 0 4 * * *   # täglich 04:00 Uhr
+      - WATCHTOWER_SCHEDULE=0 */10 * * * *   # alle 10 Minuten nach neuer Version schauen
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Zugangsdaten für das private GitHub-Image (entsteht durch `sudo docker login ghcr.io`, siehe README)
