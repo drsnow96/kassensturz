@@ -6,7 +6,7 @@ services:
     container_name: kassensturz
     restart: unless-stopped
     ports:
-      - "8090:8080"
+      - "8099:8080"
     environment:
       - TZ=Europe/Berlin
       - PUID=1026        # per SSH mit `id <dein-benutzer>` prüfen
