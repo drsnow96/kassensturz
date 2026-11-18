@@ -110,20 +110,20 @@ Sofort aktualisieren statt um 04:00:
 
 ```sh
 cd /volume2/docker/kassensturz
-sudo docker compose pull && sudo docker compose up -d
+sudo docker-compose pull && sudo docker-compose up -d
 ```
 
-**Nie** `docker compose down -v` verwenden und den Ordner `data` nicht löschen.
+**Nie** `docker-compose down -v` verwenden und den Ordner `data` nicht löschen.
 
 ## Backup zurückspielen
 
 ```sh
 cd /volume2/docker/kassensturz
-sudo docker compose stop kassensturz
+sudo docker-compose stop kassensturz
 cp data/kassensturz.sqlite data/kassensturz-defekt.sqlite
 cp data/backups/<backup-datei>.sqlite data/kassensturz.sqlite
 rm -f data/kassensturz.sqlite-wal data/kassensturz.sqlite-shm
-sudo docker compose start kassensturz
+sudo docker-compose start kassensturz
 ```
 
 ## Sicherheit
