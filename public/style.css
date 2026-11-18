@@ -262,3 +262,20 @@ body.mobile #kindSeg{width:100%;display:flex}
 body.mobile #kindSeg button{flex:1}
 .form label.mrow{flex-direction:row;align-items:center;gap:8px}
 .form input[type=checkbox], .settings input[type=checkbox]{width:auto;flex:none}
+
+/* ---------- Beleg scannen ---------- */
+.scanbox{background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:12px;display:grid;gap:6px;font-size:13px}
+.scanmatch{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.scanmatch label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.scanmatch input{width:auto;min-height:0}
+.ocrtext{white-space:pre-wrap;font-size:11px;max-height:220px;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;margin:6px 0 0}
+.form .auto, .lg.auto{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok) inset}
+.form .missing, .lg.missing{border-color:var(--opt);box-shadow:0 0 0 1px var(--opt) inset;background:color-mix(in srgb, var(--opt) 8%, var(--card))}
+.lg{display:inline-block;border:1px solid;border-radius:6px;padding:0 6px;margin-right:6px}
+.scanwait{display:flex;align-items:center;gap:12px;padding:24px 0}
+.spin{width:28px;height:28px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--paid);animation:spin 0.9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+body.dropping main::after{content:'Beleg hier ablegen';position:fixed;inset:12px;border:3px dashed var(--paid);border-radius:16px;
+  display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:600;color:var(--paid);background:color-mix(in srgb, var(--bg) 85%, transparent);z-index:20;pointer-events:none}
+input[type=radio]{width:auto!important;min-height:0!important;padding:0;border:0;accent-color:var(--paid);flex:none}
+body.mobile .scanmatch label{width:100%}

@@ -45,7 +45,8 @@
     return Number(s);
   }
   const fmtIn = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 2 });
-  const amtInput = (n) => (has(n) && Number.isFinite(Number(n)) ? fmtIn.format(Number(n)) : '');
+  const fmtIn2 = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const amtInput = (n) => (has(n) && Number.isFinite(Number(n)) ? (Number(n) % 1 ? fmtIn2 : fmtIn).format(Number(n)) : '');
   const fdate = (d) => { if (!d) return ''; const p = d.split('-'); return p.length === 3 ? `${p[2]}.${p[1]}.${p[0]}` : d; };
   const fsize = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
   const userName = (id) => { const u = S.users.find((x) => x.id === id); return u ? u.display_name : ''; };
@@ -461,6 +462,7 @@
       <select id="fst"><option value="">Alle Status</option>${STATUS.map((s) => `<option value="${s.k}" ${filt.st === s.k ? 'selected' : ''}>${s.l}</option>`).join('')}</select>
       <span class="spacer"></span>
       <a class="btn" href="/api/export.csv">CSV</a>
+      ${ocrOn() ? '<button id="scanDoc" title="PDF oder Foto einer Rechnung bzw. eines Angebots – oder Datei hierher ziehen">📄 Beleg erfassen</button>' : ''}
       <button class="primary" id="addExp">+ Position</button>
     </div>`;
     const groups = S.categories.map((c) => ({ id: c.id, name: c.name, items: S.expenses.filter((e) => e.category_id === c.id) }));
@@ -527,6 +529,7 @@
     return `<div class="toolbar">
         <input id="fq" type="search" placeholder="Suchen …" value="${esc(filt.q)}">
         <button id="filtToggle" ${active ? 'class="primary"' : ''}>Filter${active ? ' (' + active + ')' : ''}</button>
+        ${ocrOn() ? '<button id="scanDoc">📄 Beleg</button>' : ''}
       </div>
       ${filtOpen ? `<div class="filterpanel">
         <select id="fcat"><option value="">Alle Bereiche</option>${catOpts}<option value="${NOCAT}" ${filt.cat === NOCAT ? 'selected' : ''}>Ohne Kategorie</option></select>
@@ -995,17 +998,43 @@
   }
 
   // ---------- Dialog Position ----------
-  function openModal(html) { $('#dlg').innerHTML = html; $('#modal').classList.add('open'); const f = $('#dlg input'); if (f) f.focus(); }
+  function openModal(html) { $('#dlg').innerHTML = html; $('#modal').classList.add('open'); const f = $('#dlg input:not([type=radio]):not([type=checkbox]):not([type=hidden])'); if (f && !mobile) f.focus(); }
   function closeModal() { $('#modal').classList.remove('open'); $('#dlg').innerHTML = ''; if (pendingRender) render(); }
   $('#modal').addEventListener('mousedown', (e) => { if (e.target.id === 'modal') closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#modal').classList.contains('open')) closeModal(); });
 
-  function expenseDialog(id) {
+  function expenseDialog(id, scan) {
     const e = id ? S.expenses.find((x) => x.id === id) : null;
     if (id && !e) return;
-    const d = e || { status: 'geplant', included: 'nein', date: '', category_id: filt.cat && filt.cat !== NOCAT ? Number(filt.cat) : null, attachments: [], split: null };
+    const d = { ...(e || { status: 'geplant', included: 'nein', date: '', category_id: filt.cat && filt.cat !== NOCAT ? Number(filt.cat) : null, attachments: [], split: null }) };
+    const auto = new Set();
+    if (scan) {
+      // Erkannte Werte übernehmen – bei einer bestehenden Position bleiben Nr, Kostenpunkt, Bereich und Schätzung erhalten
+      const f = scan.result.fields;
+      const put = (k, v) => { if (v !== null && v !== undefined && v !== '') { d[k] = v; auto.add(k); } };
+      if (!e) { put('title', f.title); put('category_id', scan.result.category_id); }
+      put('amount', f.amount); put('status', f.status); put('date', f.date); put('due', f.due);
+      if (!e || !e.vendor) put('vendor', f.vendor);
+      if (f.note && !String(d.note || '').includes(f.note)) { d.note = [d.note, f.note].filter(Boolean).join(' · '); auto.add('note'); }
+    }
     const custom = !!d.split;
-    openModal(`<h2>${e ? 'Position bearbeiten' : 'Position anlegen'}</h2>
+    const scanBox = scan ? (() => {
+      const r = scan.result; const f = r.fields;
+      const how = { 'pdf-text': 'Text aus dem PDF', 'pdf-ocr': 'Texterkennung (Scan)', 'image-ocr': 'Texterkennung (Foto)' }[r.method] || '';
+      const typ = { rechnung: 'Rechnung', angebot: 'Angebot', auftrag: 'Auftragsbestätigung', quittung: 'Kassenbon' }[f.type] || 'Dokumentart nicht erkannt';
+      return `<div class="scanbox">
+        <div><b>${esc(scan.file.name)}</b> gelesen – ${typ}${how ? ` · ${how}` : ''}</div>
+        <div class="small muted"><span class="lg auto">erkannt</span> <span class="lg missing">bitte prüfen / ergänzen</span>${f.amount_confidence === 'niedrig' ? ' · <span class="neg">Betrag unsicher – bitte prüfen</span>' : ''}</div>
+        <div class="scanmatch"><span class="small muted">Zuordnen zu:</span>
+          <label><input type="radio" name="scanTarget" value="" ${e ? '' : 'checked'}> Neue Position</label>
+          ${r.matches.map((m) => `<label><input type="radio" name="scanTarget" value="${m.id}" ${e && e.id === m.id ? 'checked' : ''}> ${m.code ? `<span class="muted">${esc(m.code)}</span> ` : ''}${esc(m.title)}</label>`).join('')}
+          ${e && !r.matches.some((m) => m.id === e.id) ? `<label><input type="radio" name="scanTarget" value="${e.id}" checked> ${esc(e.title)}</label>` : ''}
+        </div>
+        <details><summary class="small">Erkannter Text</summary><pre class="ocrtext">${esc(r.text)}</pre></details>
+      </div>`;
+    })() : '';
+    openModal(`<h2>${scan ? (e ? 'Beleg zu Position hinzufügen' : 'Position aus Beleg anlegen') : e ? 'Position bearbeiten' : 'Position anlegen'}</h2>
+      ${scanBox}
       <form id="expForm" class="form">
         <label>Nr<input name="code" value="${esc(d.code || '')}" placeholder="z. B. A18"></label>
         <label class="wide">Bereich<select name="category_id"><option value="">Ohne Kategorie</option>${S.categories.map((c) => `<option value="${c.id}" ${d.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
@@ -1027,6 +1056,7 @@
         <div class="full">
           <div class="small muted" style="font-weight:500;margin-bottom:4px">Belege (PDF, Fotos)</div>
           <div id="attList">${(d.attachments || []).map((a) => `<div class="att"><a href="/api/attachments/${a.id}" target="_blank" rel="noopener">${esc(a.filename)}</a><span class="muted small">${fsize(a.size)}</span><button type="button" class="iconbtn" data-delatt="${a.id}">✕</button></div>`).join('')}</div>
+          ${scan ? `<div class="att"><span>📄 ${esc(scan.file.name)}</span><span class="muted small">${fsize(scan.file.size)} · wird beim Speichern angehängt</span></div>` : ''}
           <input type="file" name="files" multiple accept="application/pdf,image/*" style="margin-top:6px">
         </div>
       </form>
@@ -1041,6 +1071,18 @@
     $('#cancel').onclick = closeModal;
     form.addEventListener('submit', (ev) => { ev.preventDefault(); save(); });
     $('#saveExp').onclick = save;
+    if (scan) {
+      // erkannt = grün, fehlt = orange
+      auto.forEach((k) => { const el = form.elements[k]; if (el) el.classList.add('auto'); });
+      const need = ['title', 'category_id', 'amount', 'status'].concat(d.status === 'beauftragt' ? ['due'] : []).concat(scan.result.fields.type === 'quittung' ? [] : ['vendor']);
+      const mark = () => need.forEach((k) => { const el = form.elements[k]; if (el) el.classList.toggle('missing', !String(el.value || '').trim()); });
+      mark();
+      form.addEventListener('input', (ev) => { ev.target.classList.remove('auto'); mark(); });
+      form.addEventListener('change', mark);
+      document.querySelectorAll('[name=scanTarget]').forEach((r) => r.addEventListener('change', () => {
+        expenseDialog(r.value ? Number(r.value) : null, scan);
+      }));
+    }
     if ($('#splitDefault')) $('#splitDefault').onchange = (ev) => { $('#splitCustom').hidden = ev.target.checked; };
     // Gesamtbetrag für die €-Aufteilung folgt Angebot/Ist bzw. Schätzung
     form.addEventListener('input', (ev) => {
@@ -1084,7 +1126,8 @@
         category_id: f.get('category_id') ? Number(f.get('category_id')) : null,
         vendor: f.get('vendor'), date: f.get('date'), due: f.get('due'), hint: f.get('hint'), note: f.get('note'), split,
       };
-      const files = form.querySelector('input[type=file]').files;
+      const files = [...form.querySelector('input[type=file]').files];
+      if (scan) files.unshift(scan.file);
       $('#saveExp').disabled = true;
       try {
         let expId = e && e.id;
@@ -1105,6 +1148,44 @@
     }
   }
 
+  // ---------- Beleg scannen ----------
+  const ocrOn = () => !!(S.ocr && (S.ocr.pdftotext || S.ocr.tesseract));
+  function pickScanFile() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'application/pdf,image/*';
+    inp.onchange = () => { if (inp.files[0]) startScan(inp.files[0]); };
+    inp.click();
+  }
+  async function startScan(file) {
+    if (file.size > 25 * 1024 * 1024) { setSync('Datei zu groß (max. 25 MB)', 'warn'); return; }
+    let aborted = false;
+    openModal(`<h2>Beleg wird gelesen …</h2><div class="muted small">${esc(file.name)} · ${fsize(file.size)}</div>
+      <div class="scanwait"><div class="spin"></div><div class="muted small">Fotos und Scans dauern ein paar Sekunden.</div></div>
+      <div class="err" id="scanErr"></div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button></div>`);
+    $('#cancel').onclick = () => { aborted = true; closeModal(); };
+    try {
+      const r = await api('POST', '/api/scan', file, { 'Content-Type': file.type || 'application/octet-stream' });
+      if (aborted) return;
+      const best = r.matches[0];
+      expenseDialog(best && best.score >= 3 ? best.id : null, { result: r, file });
+    } catch (err) {
+      if (aborted) return;
+      $('.scanwait').hidden = true;
+      $('#scanErr').textContent = err.message;
+      $('#cancel').textContent = 'Schließen';
+    }
+  }
+  // Datei auf die Kostenliste ziehen = Beleg scannen
+  document.addEventListener('dragover', (ev) => { if (tab === 'kosten' && ocrOn() && !$('#modal').classList.contains('open')) { ev.preventDefault(); document.body.classList.add('dropping'); } });
+  document.addEventListener('dragleave', (ev) => { if (!ev.relatedTarget) document.body.classList.remove('dropping'); });
+  document.addEventListener('drop', (ev) => {
+    document.body.classList.remove('dropping');
+    if (tab !== 'kosten' || !ocrOn() || $('#modal').classList.contains('open')) return;
+    ev.preventDefault();
+    const f = ev.dataTransfer.files[0]; if (f) startScan(f);
+  });
+
   // ---------- Events ----------
   document.addEventListener('click', async (ev) => {
     const t = ev.target;
@@ -1116,6 +1197,7 @@
     const sr = t.closest('[data-editsrc]'); if (sr) { sourceDialog(Number(sr.dataset.editsrc)); return; }
     try {
       if (t.id === 'addExp') { expenseDialog(null); return; }
+      if (t.id === 'scanDoc') { pickScanFile(); return; }
       if (t.id === 'filtToggle') { filtOpen = !filtOpen; render(); return; }
       if (t.dataset.splitmode) { switchSplitMode(t.dataset.for, t.dataset.splitmode); return; }
       if (t.dataset.savesplit) {

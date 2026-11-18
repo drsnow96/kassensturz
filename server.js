@@ -12,6 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const ocr = require('./ocr');
 
 const VERSION = require('./package.json').version;
 const PORT = Number(process.env.PORT) || 8080;
@@ -247,6 +248,10 @@ function dailyBackup() {
 dailyBackup();
 setInterval(dailyBackup, 60 * 60 * 1000).unref();
 
+// Texterkennung verfügbar? (einmal beim Start prüfen)
+let ocrStatus = { pdftotext: false, tesseract: false, deu: false };
+ocr.available().then((st) => { ocrStatus = st; log('Texterkennung:', JSON.stringify(st)); }).catch(() => {});
+
 // Änderungszähler für das Polling der Clients
 let rev = Date.now();
 const bump = () => { rev += 1; };
@@ -414,6 +419,7 @@ function state(user) {
     version: VERSION,
     me: user,
     settings: settings(),
+    ocr: ocrStatus,
     users: db.prepare('SELECT id, username, display_name FROM users ORDER BY id').all(),
     categories: db.prepare('SELECT * FROM categories ORDER BY sort, id').all(),
     expenses,
@@ -685,6 +691,30 @@ async function api(req, res, url) {
       bump();
       return send(res, 200, { ok: true });
     }
+  }
+
+  // Beleg lesen (OCR) – die Datei wird nur ausgewertet und nicht gespeichert
+  if (p === '/api/scan' && m === 'POST') {
+    const mime = str(req.headers['content-type'], 100).split(';')[0] || 'application/octet-stream';
+    const body = await readBody(req, MAX_UPLOAD);
+    if (!body.length) throw new HttpError(400, 'Leere Datei');
+    let res2;
+    try { res2 = await ocr.extractText(body, mime); }
+    catch (e) {
+      if (e.code === 'ENOENT') throw new HttpError(501, 'Die Texterkennung ist auf diesem Server nicht installiert.');
+      log('OCR-Fehler:', e.message, e.stderr || '');
+      throw new HttpError(422, 'Der Beleg konnte nicht gelesen werden. Bitte ein schärferes Foto oder ein PDF verwenden.');
+    }
+    const fields = ocr.parseDocument(res2.text);
+    const expenses = db.prepare('SELECT id, code, title, hint, vendor, estimate, category_id FROM expenses').all();
+    const categories = db.prepare('SELECT id, name FROM categories').all();
+    const matches = ocr.matchPositions(fields, res2.text, expenses, categories);
+    const best = matches[0] && expenses.find((e) => e.id === matches[0].id);
+    log(`Beleg gelesen (${res2.method}, ${res2.text.length} Zeichen) von ${user.username}`);
+    return send(res, 200, {
+      method: res2.method, text: res2.text.slice(0, 8000), fields, matches,
+      category_id: best ? best.category_id : null,
+    });
   }
 
   // Belege

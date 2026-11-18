@@ -1,14 +1,16 @@
 # Kassensturz – schlankes Image ohne npm-Abhängigkeiten
 FROM node:24-alpine
 
-RUN apk add --no-cache su-exec tzdata
+# su-exec: Rechte abgeben · tesseract + deutsch: Texterkennung · poppler-utils: PDF-Text und -Seitenbilder
+RUN apk add --no-cache su-exec tzdata tesseract-ocr tesseract-ocr-data-deu poppler-utils \
+ && tesseract --list-langs | grep -q '^deu$' && command -v pdftotext && command -v pdftoppm
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     PORT=8080 \
     TZ=Europe/Berlin
 
 WORKDIR /app
-COPY package.json server.js docker-entrypoint.sh ./
+COPY package.json server.js ocr.js docker-entrypoint.sh ./
 COPY public ./public
 RUN chmod +x docker-entrypoint.sh
 
