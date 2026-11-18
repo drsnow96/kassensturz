@@ -187,8 +187,33 @@ test('Migration v1 → v2 behält Daten, Import und Aufteilung funktionieren', a
     assert.equal(r.status, 200);
     r = await call('GET', '/api/state');
     assert.equal(r.body.settings.reserve_rate, 0.05);
-    assert.equal(r.body.settings.default_split[ids[0]], 60);
-    assert.equal(r.body.expenses.find((e) => e.code === 'X1').split[ids[1]], 30);
+    assert.equal(r.body.settings.default_split.values[ids[0]], 60);
+    assert.equal(r.body.expenses.find((e) => e.code === 'X1').split.values[ids[1]], 30);
+
+    // Aufteilung in Euro: muss den Betrag der Position ergeben
+    r = await call('POST', '/api/expenses', { title: 'Euro-Aufteilung', amount: 1000, status: 'bezahlt', split: { mode: 'eur', values: { [ids[0]]: 800, [ids[1]]: 200 } } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    r = await call('POST', '/api/expenses', { title: 'Euro falsch', amount: 1000, split: { mode: 'eur', values: { [ids[0]]: 800, [ids[1]]: 100 } } });
+    assert.equal(r.status, 400);
+    r = await call('PUT', '/api/settings', { default_split: { mode: 'eur', values: { [ids[0]]: 1, [ids[1]]: 1 } } });
+    assert.equal(r.status, 400, 'Standardaufteilung nur in Prozent');
+
+    // Darlehen mit Rate und Aufteilung
+    let st2 = await call('GET', '/api/state');
+    const kfw = st2.body.sources.find((x) => x.name.startsWith('KfW'));
+    assert.equal(kfw.kind, 'darlehen', 'Migration 3 markiert KfW als Darlehen');
+    r = await call('PUT', `/api/sources/${kfw.id}`, { amount: 100000, interest: 2.5, rate: 500, start: '2027-03', fixed_years: 10, grace_months: 12 });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    r = await call('PUT', `/api/sources/${kfw.id}`, { split: { mode: 'eur', values: { [ids[0]]: 300, [ids[1]]: 200 } } });
+    assert.equal(r.status, 200);
+    r = await call('PUT', `/api/sources/${kfw.id}`, { split: { mode: 'eur', values: { [ids[0]]: 300, [ids[1]]: 100 } } });
+    assert.equal(r.status, 400, 'Raten-Aufteilung muss die Rate ergeben');
+    r = await call('PUT', `/api/sources/${kfw.id}`, { start: '13.2027' });
+    assert.equal(r.status, 400);
+    st2 = await call('GET', '/api/state');
+    const k2 = st2.body.sources.find((x) => x.id === kfw.id);
+    assert.equal(k2.rate, 500); assert.equal(k2.interest, 2.5); assert.equal(k2.start, '2027-03');
+    assert.equal(k2.grace_months, 12); assert.equal(k2.split.values[ids[0]], 300);
 
     // Import (Beispieldaten, keine echten Werte) – zweimal, darf nicht verdoppeln
     const imp = {
@@ -213,7 +238,7 @@ test('Migration v1 → v2 behält Daten, Import und Aufteilung funktionieren', a
     assert.equal(r.body.categories.find((c) => c.name === 'Haus').reserve, 0);
     r = await call('GET', '/api/export.json');
     assert.equal(r.body.format, 'kassensturz-import');
-    assert.equal(r.body.positions.length, 5);
+    assert.equal(r.body.positions.length, 6);
   } finally {
     await stop(srv);
     fs.rmSync(DATA, { recursive: true, force: true });

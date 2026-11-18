@@ -203,3 +203,27 @@ body.mobile .dlg{min-height:100vh;min-height:100dvh;height:auto}
 body.mobile main{padding-bottom:96px}
 body.mobile input[type=checkbox]{min-height:0;width:22px!important;height:22px;flex:none;accent-color:var(--paid)}
 input[type=checkbox]{accent-color:var(--paid)}
+
+/* ---------- Aufteilung: Umschalter % / € ---------- */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;width:max-content}
+.seg button{border:0;border-radius:0;padding:6px 12px;background:transparent;color:var(--muted);min-height:0}
+.seg button.on{background:var(--paid);color:#fff}
+
+/* ---------- Finanzierung: Bausteine als Karten ---------- */
+.srcgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px;align-items:start}
+.srccard{display:flex;flex-direction:column}
+.srccard select{flex:none}
+.srcfields{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.srcfields .mfield input, .srccard .mfield input{width:100%}
+.loanstats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px 12px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-variant-numeric:tabular-nums;font-size:13px}
+.loanstats small{display:block;color:var(--muted);font-size:11px}
+.loanstats .strong{font-weight:700}
+details.plan{margin-top:12px}
+details.plan summary{cursor:pointer;font-size:13px;font-weight:500;color:var(--paid)}
+details.plan table{margin-top:6px;font-size:12px}
+details.plan tr.cur td{background:var(--bg);font-weight:600}
+body.mobile .srcgrid{grid-template-columns:1fr;gap:10px}
+body.mobile .loanstats{grid-template-columns:1fr 1fr}
+body.mobile .seg button{min-height:40px;padding:6px 14px}
+.srccard .mrow > input{min-width:0;width:auto}
+.srccard{min-width:0}

@@ -44,7 +44,8 @@
     else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
     return Number(s);
   }
-  const amtInput = (n) => (has(n) && Number(n) !== 0 ? String(n).replace('.', ',') : (Number(n) === 0 && has(n) ? '0' : ''));
+  const fmtIn = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 2 });
+  const amtInput = (n) => (has(n) && Number.isFinite(Number(n)) ? fmtIn.format(Number(n)) : '');
   const fdate = (d) => { if (!d) return ''; const p = d.split('-'); return p.length === 3 ? `${p[2]}.${p[1]}.${p[0]}` : d; };
   const fsize = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
   const userName = (id) => { const u = S.users.find((x) => x.id === id); return u ? u.display_name : ''; };
@@ -194,47 +195,146 @@
   }
   const finTotal = () => S.sources.reduce((s, x) => s + num(x.amount), 0);
 
-  // Aufteilung der Zahlungen
+  // Aufteilung der Zahlungen: {mode: 'pct'|'eur', values: {userId: Zahl}}
+  function normSplit(sp) {
+    if (!sp || typeof sp !== 'object') return null;
+    if (sp.mode) return { mode: sp.mode === 'eur' ? 'eur' : 'pct', values: sp.values || {} };
+    return { mode: 'pct', values: sp }; // altes Format {userId: Prozent}
+  }
   function defaultSplit() {
     const ids = S.users.map((u) => u.id);
-    const d = S.settings.default_split;
-    if (d && ids.length && ids.every((id) => d[id] != null)) {
-      const sum = ids.reduce((s, id) => s + num(d[id]), 0);
-      if (Math.abs(sum - 100) < 0.6) return Object.fromEntries(ids.map((id) => [id, num(d[id])]));
+    const d = normSplit(S.settings.default_split);
+    if (d && d.mode === 'pct' && ids.length && ids.every((id) => d.values[id] != null)) {
+      const sum = ids.reduce((x, id) => x + num(d.values[id]), 0);
+      if (Math.abs(sum - 100) < 0.6) return { mode: 'pct', values: Object.fromEntries(ids.map((id) => [id, num(d.values[id])])) };
     }
-    return Object.fromEntries(ids.map((id) => [id, ids.length ? 100 / ids.length : 0]));
+    return { mode: 'pct', values: Object.fromEntries(ids.map((id) => [id, ids.length ? 100 / ids.length : 0])) };
   }
-  function splitOf(e) {
-    if (e.split && S.users.every((u) => e.split[u.id] != null)) return e.split;
-    if (e.split) { // Benutzer wurde ergänzt/entfernt: vorhandene Anteile übernehmen, Rest 0
-      return Object.fromEntries(S.users.map((u) => [u.id, num(e.split[u.id])]));
-    }
-    return defaultSplit();
+  function splitOf(x) {
+    const n = normSplit(x && x.split);
+    if (!n) return defaultSplit();
+    return { mode: n.mode, values: Object.fromEntries(S.users.map((u) => [u.id, num(n.values[u.id])])) };
   }
-  const splitLabel = (sp) => S.users.map((u) => pct.format(num(sp[u.id]))).join(' : ');
+  /** Euro-Anteile je Person für einen Gesamtbetrag */
+  function shareAmounts(sp, total) {
+    const out = {};
+    if (sp.mode === 'eur') {
+      const sum = S.users.reduce((x, u) => x + num(sp.values[u.id]), 0);
+      const f = sum > 0 && total > 0 && Math.abs(sum - total) > 0.5 ? total / sum : 1;
+      S.users.forEach((u) => { out[u.id] = num(sp.values[u.id]) * f; });
+    } else S.users.forEach((u) => { out[u.id] = total * num(sp.values[u.id]) / 100; });
+    return out;
+  }
+  const splitLabel = (sp) => (sp.mode === 'eur'
+    ? S.users.map((u) => fmt0.format(num(sp.values[u.id]))).join(' / ')
+    : S.users.map((u) => pct.format(num(sp.values[u.id]))).join(' : ') + ' %');
   function paidByUser() {
     const out = Object.fromEntries(S.users.map((u) => [u.id, 0]));
     let total = 0;
     S.expenses.filter((e) => e.status === 'bezahlt' && counts(e)).forEach((e) => {
-      const sp = splitOf(e); const c = cost(e); total += c;
-      S.users.forEach((u) => { out[u.id] += c * num(sp[u.id]) / 100; });
+      const c = cost(e); total += c;
+      const sh = shareAmounts(splitOf(e), c);
+      S.users.forEach((u) => { out[u.id] += sh[u.id]; });
     });
     return { out, total };
   }
 
+  // ---------- Darlehen ----------
+  function parseMonth(v) {
+    const t = String(v || '').trim(); let m;
+    if (!t) return '';
+    if ((m = t.match(/^(\d{4})-(\d{1,2})$/))) return `${m[1]}-${m[2].padStart(2, '0')}`;
+    if ((m = t.match(/^(\d{1,2})[./-](\d{4})$/))) return `${m[2]}-${m[1].padStart(2, '0')}`;
+    return null;
+  }
+  const fmonth = (ym) => (ym ? `${ym.slice(5, 7)}.${ym.slice(0, 4)}` : '');
+  const ymIndex = (ym) => Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1;
+  const ymFrom = (idx) => `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}`;
+  const thisMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+  const parseNum = (v) => { const t = String(v == null ? '' : v).trim(); if (!t) return null; const n = Number(t.replace(/\./g, '').replace(',', '.')); return Number.isFinite(n) ? n : NaN; };
+  const fpct = (n) => pct.format(n) + ' %';
+  function dur(months) { const y = Math.floor(months / 12), m = months % 12; return [y ? y + ' J.' : '', m ? m + ' Mon.' : ''].filter(Boolean).join(' ') || '0 Mon.'; }
+
+  /** Annuitäten-Tilgungsplan, Monat für Monat (Zinsen = Restschuld × Sollzins/12) */
+  function loanPlan(s) {
+    const P = num(s.amount), i = num(s.interest) / 100 / 12, R = num(s.rate), g = num(s.grace_months);
+    if (!(P > 0) || !(R > 0)) return null;
+    const rows = []; let rest = P, stuck = false;
+    for (let m = 0; rest > 0.005 && m < 600; m++) {
+      const zins = rest * i;
+      let pay;
+      if (m < g) pay = zins;
+      else { if (R <= zins + 0.005) stuck = true; pay = Math.min(R, rest + zins); }
+      const tilg = pay - zins;
+      rest = Math.max(0, rest - tilg);
+      rows.push({ m, zins, tilg, pay, rest });
+      if (stuck && m > g + 1) break;
+    }
+    const start = s.start || '';
+    const elapsed = start ? Math.max(0, Math.min(rows.length, ymIndex(thisMonth()) - ymIndex(start) + 1)) : 0;
+    const sum = (arr, k) => arr.reduce((x, r) => x + r[k], 0);
+    const done = rows.slice(0, elapsed);
+    const nFix = s.fixed_years ? Math.min(rows.length, s.fixed_years * 12) : 0;
+    const fix = nFix ? rows.slice(0, nFix) : null;
+    return {
+      rows, stuck, start, elapsed,
+      initialTilgung: P ? ((R - P * i) * 12 / P) * 100 : 0,
+      paid: sum(done, 'pay'), zinsPaid: sum(done, 'zins'), tilgPaid: sum(done, 'tilg'),
+      restToday: elapsed ? rows[elapsed - 1].rest : P,
+      fixEnd: fix ? { months: nFix, rest: rows[nFix - 1].rest, zins: sum(fix, 'zins'), tilg: sum(fix, 'tilg'), ym: start ? ymFrom(ymIndex(start) + nFix - 1) : '' } : null,
+      payoff: stuck ? null : { months: rows.length, ym: start ? ymFrom(ymIndex(start) + rows.length - 1) : '' },
+      zinsTotal: sum(rows, 'zins'),
+    };
+  }
+  function loans() { return S.sources.filter((x) => x.kind === 'darlehen'); }
+  function loanTotals() {
+    const t = { rate: 0, restToday: 0, zinsPaid: 0, tilgPaid: 0, paid: 0, perUser: Object.fromEntries(S.users.map((u) => [u.id, { rate: 0, paid: 0, zins: 0, tilg: 0 }])) };
+    loans().forEach((s) => {
+      const R = num(s.rate);
+      const pl = loanPlan(s);
+      t.rate += R;
+      t.restToday += pl ? pl.restToday : num(s.amount);
+      if (!pl) return;
+      t.zinsPaid += pl.zinsPaid; t.tilgPaid += pl.tilgPaid; t.paid += pl.paid;
+      const sh = shareAmounts(splitOf(s), R);
+      S.users.forEach((u) => {
+        const f = R ? sh[u.id] / R : 0;
+        const p = t.perUser[u.id];
+        p.rate += sh[u.id]; p.paid += pl.paid * f; p.zins += pl.zinsPaid * f; p.tilg += pl.tilgPaid * f;
+      });
+    });
+    return t;
+  }
+
   // ---------- Rendering ----------
   function render() {
-    const ae = document.activeElement;
-    if (ae && ae.closest && ae.closest('[data-live]')) { pendingRender = true; return; }
     if ($('#modal').classList.contains('open')) { pendingRender = true; return; }
+    // Fokus und gerade getippten Wert über das Neuzeichnen hinweg erhalten
+    const ae = document.activeElement;
+    let keep = null;
+    if (ae && ae.closest && ae.closest('[data-live]')) {
+      const d = ae.dataset;
+      const key = d.src ? `[data-src="${d.src}"][data-f="${d.f}"]` : d.cat ? `[data-cat="${d.cat}"][data-f="${d.f}"]`
+        : d.split ? `[data-split="${d.split}"][data-uid="${d.uid}"]` : null;
+      if (!key && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) { pendingRender = true; return; }
+      if (key) keep = { key, value: ae.value, dirty: 'defaultValue' in ae && ae.value !== ae.defaultValue, start: ae.selectionStart, end: ae.selectionEnd };
+    }
     pendingRender = false;
     document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
     const v = $('#view');
     if (tab === 'kosten') v.innerHTML = mobile ? viewCostsMobile() : viewCosts();
     else if (tab === 'budget') v.innerHTML = mobile ? viewBudgetMobile() : viewBudget();
-    else if (tab === 'finanzierung') v.innerHTML = mobile ? viewFinanceMobile() : viewFinance();
+    else if (tab === 'finanzierung') v.innerHTML = viewFinance();
     else if (tab === 'einstellungen') { v.innerHTML = viewSettings(); loadBackups(); }
     else v.innerHTML = viewOverview();
+    if (keep) {
+      const n = document.querySelector(keep.key);
+      if (n) {
+        if (keep.dirty && n.tagName === 'INPUT' && n.type !== 'checkbox') n.value = keep.value;
+        n.focus({ preventScroll: true });
+        try { if (keep.start != null) n.setSelectionRange(keep.start, keep.end); } catch (e) { /* nicht jeder Typ */ }
+      }
+    }
   }
   document.addEventListener('focusout', () => setTimeout(() => { if (pendingRender) render(); }, 60));
 
@@ -278,12 +378,19 @@
     // Wer hat gezahlt
     if (S.users.length) {
       const { out, total } = paidByUser();
-      const target = defaultSplit();
+      const target = defaultSplit().values;
+      const lt = loanTotals();
+      const hasLoans = loans().some((x) => num(x.rate) > 0);
       html += `<div class="card"><h2>Gezahlt nach Person</h2><table><tbody>${S.users.map((u) => {
         const diff = out[u.id] - total * num(target[u.id]) / 100;
-        return `<tr><td>${esc(u.display_name)}<div class="muted small">Soll ${pct.format(num(target[u.id]))} %</div></td><td class="num">${fmt0.format(out[u.id])}
-          ${S.users.length > 1 && Math.abs(diff) >= 1 ? `<div class="small ${diff > 0 ? 'pos' : 'neg'}">${diff > 0 ? '+' : '−'}${fmt0.format(Math.abs(diff))} ggü. Soll</div>` : ''}</td></tr>`;
-      }).join('')}</tbody><tfoot><tr><td>Bezahlt gesamt</td><td class="num">${fmt0.format(total)}</td></tr></tfoot></table></div>`;
+        const lu = lt.perUser[u.id];
+        return `<tr><td>${esc(u.display_name)}<div class="muted small">Soll ${pct.format(num(target[u.id]))} %</div>
+            ${hasLoans ? `<div class="muted small">Kreditrate ${fmt0.format(lu.rate)} / Monat</div>` : ''}</td>
+          <td class="num">${fmt0.format(out[u.id])}
+          ${S.users.length > 1 && Math.abs(diff) >= 1 ? `<div class="small ${diff > 0 ? 'pos' : 'neg'}">${diff > 0 ? '+' : '−'}${fmt0.format(Math.abs(diff))} ggü. Soll</div>` : ''}
+          ${hasLoans && lu.paid ? `<div class="muted small">+ ${fmt0.format(lu.paid)} Raten</div>` : ''}</td></tr>`;
+      }).join('')}</tbody><tfoot><tr><td>Bezahlt gesamt (Positionen)</td><td class="num">${fmt0.format(total)}</td></tr>
+        ${hasLoans ? `<tr><td>Kreditraten bisher</td><td class="num">${fmt0.format(lt.paid)}</td></tr>` : ''}</tfoot></table></div>`;
     }
 
     const open = S.expenses.filter((e) => e.status === 'beauftragt' && counts(e))
@@ -400,38 +507,6 @@
     return html;
   }
 
-  function viewFinance() {
-    const ft = finTotal();
-    const t = totals(S.expenses);
-    const gap = ft - t.gesamt;
-    const maxv = Math.max(ft, t.worst, 1);
-    let html = `<div class="grid kpis">
-      ${kpi('Finanzierung gesamt', fmt0.format(ft))}
-      ${kpi('Bedarf', fmt0.format(t.gesamt), 'Gesamtbudget inkl. Reserve')}
-      ${kpi(gap < 0 ? 'Finanzierungslücke' : 'Puffer', fmt0.format(Math.abs(gap)), '', gap < 0 ? 'neg' : 'pos')}
-      ${kpi('Puffer im Worst Case', fmt0.format(ft - t.worst), '', ft - t.worst < 0 ? 'neg' : 'pos')}
-    </div>
-    <div class="card" style="margin-top:14px"><h2>Finanzierung vs. Bedarf</h2>
-      <div class="small muted">Finanzierung</div><div class="finbar"><div style="width:${((ft / maxv) * 100).toFixed(1)}%;background:var(--paid)"></div></div>
-      <div class="small muted">Bedarf (Gesamtbudget)</div><div class="finbar"><div style="width:${((t.gesamt / maxv) * 100).toFixed(1)}%;background:var(--comm)"></div></div>
-      <div class="small muted">Worst Case</div><div class="finbar"><div style="width:${((t.worst / maxv) * 100).toFixed(1)}%;background:var(--offer)"></div></div>
-    </div>
-    <div class="toolbar" style="margin-top:18px"><h2 style="margin:0">Finanzierungsbausteine</h2><span class="spacer"></span><button class="primary" id="addSrc">+ Baustein</button></div>
-    <div class="card" style="padding:4px 8px;overflow-x:auto"><table class="edit-table" data-live><thead><tr><th style="width:30%">Baustein</th><th class="num" style="width:18%">Betrag</th><th>Notiz (Zins, Laufzeit, Bank …)</th><th></th></tr></thead><tbody>`;
-    S.sources.forEach((s) => {
-      html += `<tr><td><input data-src="${s.id}" data-f="name" value="${esc(s.name)}"></td>
-        <td><input data-src="${s.id}" data-f="amount" inputmode="decimal" style="text-align:right" value="${esc(s.amount ? amtInput(s.amount) : '')}" placeholder="0"></td>
-        <td><input data-src="${s.id}" data-f="note" value="${esc(s.note || '')}"></td>
-        <td class="num"><button class="iconbtn" data-delsrc="${s.id}" title="Entfernen">✕</button></td></tr>`;
-    });
-    if (!S.sources.length) html += `<tr><td colspan="4"><div class="empty">Noch keine Finanzierungsbausteine.</div></td></tr>`;
-    html += `</tbody><tfoot><tr><td>Summe</td><td class="num">${fmt0.format(ft)}</td><td colspan="2"></td></tr></tfoot></table></div>
-    <div class="err" id="finErr"></div>
-    <div class="note"><b>KfW 297 „Klimafreundlicher Neubau“ (selbstgenutzt):</b> Kredit bis 100.000 € je Wohneinheit, mit QNG-Nachhaltigkeitssiegel bis 150.000 €. Konditionen ändern sich regelmäßig – aktuellen Zinssatz bei der Hausbank bzw. auf kfw.de/297 prüfen. Für den Antrag muss die Baugenehmigung vorliegen.</div>`;
-    return html;
-  }
-
-
   // ---------- Mobile Ansichten ----------
   function filterBar() {
     const active = [filt.cat, filt.inc, filt.st].filter(Boolean).length;
@@ -495,6 +570,7 @@
   document.addEventListener('toggle', (ev) => {
     const d = ev.target;
     if (d.classList && d.classList.contains('mgroup')) { if (d.open) openGroups.add(d.dataset.group); else openGroups.delete(d.dataset.group); }
+    if (d.classList && d.classList.contains('plan')) { if (d.open) openPlans.add(d.dataset.plan); else openPlans.delete(d.dataset.plan); }
   }, true);
 
   function viewBudgetMobile() {
@@ -531,47 +607,164 @@
     return html;
   }
 
-  function viewFinanceMobile() {
+  function viewFinance() {
     const ft = finTotal();
     const t = totals(S.expenses);
     const gap = ft - t.gesamt;
     const maxv = Math.max(ft, t.worst, 1);
+    const lt = loanTotals();
+    const hasLoans = loans().length > 0;
     let html = `<div class="grid kpis">
-      ${kpi('Finanzierung', fmt0.format(ft))}
-      ${kpi('Bedarf', fmt0.format(t.gesamt), 'inkl. Reserve')}
-      ${kpi(gap < 0 ? 'Lücke' : 'Puffer', fmt0.format(Math.abs(gap)), '', gap < 0 ? 'neg' : 'pos')}
-      ${kpi('Puffer Worst Case', fmt0.format(ft - t.worst), '', ft - t.worst < 0 ? 'neg' : 'pos')}
+      ${kpi('Finanzierung gesamt', fmt0.format(ft))}
+      ${kpi('Bedarf', fmt0.format(t.gesamt), 'Gesamtbudget inkl. Reserve')}
+      ${kpi(gap < 0 ? 'Finanzierungslücke' : 'Puffer', fmt0.format(Math.abs(gap)), '', gap < 0 ? 'neg' : 'pos')}
+      ${kpi('Puffer im Worst Case', fmt0.format(ft - t.worst), '', ft - t.worst < 0 ? 'neg' : 'pos')}
+      ${hasLoans ? kpi('Monatliche Rate', fmt0.format(lt.rate), 'alle Darlehen') : ''}
+      ${hasLoans ? kpi('Restschuld heute', fmt0.format(lt.restToday), `Zinsen bisher ${fmt0.format(lt.zinsPaid)} · Tilgung ${fmt0.format(lt.tilgPaid)}`) : ''}
     </div>
-    <div class="card" style="margin-top:10px">
-      <div class="small muted">Finanzierung</div><div class="finbar"><div style="width:${((ft / maxv) * 100).toFixed(1)}%;background:var(--paid)"></div></div>
-      <div class="small muted">Bedarf</div><div class="finbar"><div style="width:${((t.gesamt / maxv) * 100).toFixed(1)}%;background:var(--comm)"></div></div>
-      <div class="small muted">Worst Case</div><div class="finbar"><div style="width:${((t.worst / maxv) * 100).toFixed(1)}%;background:var(--offer)"></div></div>
-    </div>
-    <h2 style="margin:16px 2px 8px">Finanzierungsbausteine</h2><div data-live>`;
-    S.sources.forEach((src) => {
-      html += `<div class="mcard">
-        <input data-src="${src.id}" data-f="name" value="${esc(src.name)}" style="width:100%;font-weight:600">
-        <label class="mfield">Betrag (€)<input data-src="${src.id}" data-f="amount" inputmode="decimal" value="${esc(src.amount ? amtInput(src.amount) : '')}" placeholder="0"></label>
-        <label class="mfield">Notiz (Zins, Laufzeit, Bank …)<input data-src="${src.id}" data-f="note" value="${esc(src.note || '')}"></label>
-        <div class="mrow" style="margin-top:10px;justify-content:flex-end"><button class="iconbtn" data-delsrc="${src.id}">Entfernen</button></div>
+    <div class="grid two">
+      <div class="card"><h2>Finanzierung vs. Bedarf</h2>
+        <div class="small muted">Finanzierung</div><div class="finbar"><div style="width:${((ft / maxv) * 100).toFixed(1)}%;background:var(--paid)"></div></div>
+        <div class="small muted">Bedarf (Gesamtbudget)</div><div class="finbar"><div style="width:${((t.gesamt / maxv) * 100).toFixed(1)}%;background:var(--comm)"></div></div>
+        <div class="small muted">Worst Case</div><div class="finbar"><div style="width:${((t.worst / maxv) * 100).toFixed(1)}%;background:var(--offer)"></div></div>
       </div>`;
-    });
-    html += `</div><button class="primary" id="addSrc" style="width:100%">+ Baustein</button>
-      <div class="err" id="finErr"></div>
-      <div class="card" style="margin-top:12px"><div class="mtotal b" style="border:0;margin:0;padding:0"><span>Summe</span><span>${fmt0.format(ft)}</span></div></div>
-      <div class="note"><b>KfW 297:</b> Kredit bis 100.000 € je Wohneinheit, mit QNG-Siegel bis 150.000 €. Aktuelle Konditionen bei der Hausbank bzw. auf kfw.de/297 prüfen.</div>`;
+    if (hasLoans && S.users.length) {
+      html += `<div class="card"><h2>Kreditraten je Person</h2><table><thead><tr><th></th><th class="num">pro Monat</th><th class="num">bisher</th><th class="num">davon Zinsen</th></tr></thead><tbody>
+        ${S.users.map((u) => { const p = lt.perUser[u.id]; return `<tr><td>${esc(u.display_name)}</td><td class="num">${fmt0.format(p.rate)}</td><td class="num">${fmt0.format(p.paid)}</td><td class="num">${fmt0.format(p.zins)}</td></tr>`; }).join('')}
+        </tbody><tfoot><tr><td>Summe</td><td class="num">${fmt0.format(lt.rate)}</td><td class="num">${fmt0.format(lt.paid)}</td><td class="num">${fmt0.format(lt.zinsPaid)}</td></tr></tfoot></table>
+        <div class="muted small" style="margin-top:6px">Annahme: Raten werden ab der ersten Rate monatlich pünktlich gezahlt.</div></div>`;
+    } else html += `<div></div>`;
+    html += `</div>
+    <div class="toolbar" style="margin-top:18px"><h2 style="margin:0">Finanzierungsbausteine</h2><span class="spacer"></span>
+      <button id="addSrc">+ Eigenkapital / Sonstiges</button><button class="primary" id="addLoan">+ Darlehen</button></div>
+    <div class="err" id="finErr"></div>
+    <div class="srcgrid" data-live>`;
+    S.sources.forEach((src) => { html += sourceCard(src); });
+    if (!S.sources.length) html += `<div class="empty">Noch keine Finanzierungsbausteine.</div>`;
+    html += `</div>
+    <div class="note"><b>KfW 297 „Klimafreundlicher Neubau“ (selbstgenutzt):</b> Kredit bis 100.000 € je Wohneinheit, mit QNG-Nachhaltigkeitssiegel bis 150.000 €, oft mit tilgungsfreien Anlaufjahren. Konditionen ändern sich regelmäßig – aktuellen Zinssatz bei der Hausbank bzw. auf kfw.de/297 prüfen.</div>`;
     return html;
   }
 
-  function splitInputs(sp, prefix) {
+  const KINDS = [{ k: 'eigen', l: 'Eigenkapital' }, { k: 'darlehen', l: 'Darlehen' }, { k: 'sonstig', l: 'Sonstiges' }];
+  function sourceCard(src) {
+    const isLoan = src.kind === 'darlehen';
+    const f = (label, field, val, attrs = '') => `<label class="mfield">${label}<input data-src="${src.id}" data-f="${field}" value="${esc(val)}" ${attrs}></label>`;
+    let html = `<div class="card srccard">
+      <div class="mrow"><input data-src="${src.id}" data-f="name" value="${esc(src.name)}" style="flex:1;font-weight:600">
+        <select data-src="${src.id}" data-f="kind" style="width:auto">${KINDS.map((k) => `<option value="${k.k}" ${src.kind === k.k ? 'selected' : ''}>${k.l}</option>`).join('')}</select></div>
+      <div class="srcfields">
+        ${f(isLoan ? 'Darlehensbetrag (€)' : 'Betrag (€)', 'amount', src.amount ? amtInput(src.amount) : '', 'inputmode="decimal" placeholder="0"')}`;
+    if (isLoan) {
+      html += `${f('Sollzins (% p. a.)', 'interest', src.interest != null ? String(src.interest).replace('.', ',') : '', 'inputmode="decimal" placeholder="z. B. 3,45"')}
+        ${f('Monatliche Rate (€)', 'rate', src.rate ? amtInput(src.rate) : '', 'inputmode="decimal" placeholder="z. B. 1.250"')}
+        ${f('Erste Rate (Monat)', 'start', fmonth(src.start), 'placeholder="MM.JJJJ"')}
+        ${f('Zinsbindung (Jahre)', 'fixed_years', src.fixed_years != null ? src.fixed_years : '', 'inputmode="numeric" placeholder="z. B. 10"')}
+        ${f('Tilgungsfreie Monate', 'grace_months', src.grace_months || '', 'inputmode="numeric" placeholder="0"')}`;
+    }
+    html += `</div>${f('Notiz (Bank, Vertragsnr. …)', 'note', src.note || '')}`;
+    if (isLoan) html += loanDetails(src);
+    html += `<div class="mrow" style="margin-top:10px;justify-content:flex-end"><button class="iconbtn" data-delsrc="${src.id}">Entfernen</button></div></div>`;
+    return html;
+  }
+
+  function loanDetails(src) {
+    const pl = loanPlan(src);
+    if (!pl) return `<div class="note">Darlehensbetrag und monatliche Rate eintragen, dann erscheinen Zinsen, Tilgung und Restschuld.</div>`;
+    const cell = (l, v, cls = '') => `<div><small>${l}</small><span class="${cls}">${v}</span></div>`;
+    let html = '';
+    if (pl.stuck) html += `<div class="err">Die Rate deckt nach den tilgungsfreien Monaten nicht einmal die Zinsen (${fmt0.format(num(src.amount) * num(src.interest) / 1200)} / Monat) – die Schuld wird nicht kleiner.</div>`;
+    html += `<div class="loanstats">
+      ${cell('Anfängliche Tilgung', fpct(pl.initialTilgung))}
+      ${cell('Gesamtzinsen (Laufzeit)', pl.stuck ? '–' : fmt0.format(pl.zinsTotal))}
+      ${cell('Schuldenfrei', pl.payoff ? (pl.payoff.ym ? fmonth(pl.payoff.ym) : '') + ` (${dur(pl.payoff.months)})` : '–')}
+      ${cell(pl.start ? `Raten bis heute (${pl.elapsed})` : 'Raten bis heute', pl.start ? fmt0.format(pl.paid) : 'Erste Rate fehlt')}
+      ${cell('Zinsen bezahlt', fmt0.format(pl.zinsPaid))}
+      ${cell('Tilgung bezahlt', fmt0.format(pl.tilgPaid))}
+      ${cell('Restschuld heute', fmt0.format(pl.restToday), 'strong')}
+      ${pl.fixEnd ? cell(`Restschuld Ende Zinsbindung${pl.fixEnd.ym ? ' ' + fmonth(pl.fixEnd.ym) : ''}`, fmt0.format(pl.fixEnd.rest), 'strong') : cell('Zinsbindung', 'nicht angegeben')}
+      ${pl.fixEnd ? cell('Zinsen bis Ende Zinsbindung', fmt0.format(pl.fixEnd.zins)) : ''}
+    </div>`;
+    if (S.users.length > 1) {
+      const sp = splitOf(src);
+      const sh = shareAmounts(sp, num(src.rate));
+      html += `<div class="small muted" style="font-weight:500;margin-top:12px">Aufteilung der Rate</div>
+        <div class="small">${S.users.map((u) => `${esc(u.display_name)}: <b>${fmt0.format(sh[u.id])}</b>`).join(' · ')} pro Monat</div>
+        <label class="mrow small muted" style="margin-top:6px"><input type="checkbox" data-splitdef="src${src.id}" ${src.split ? '' : 'checked'}> Standardaufteilung (${splitLabel(defaultSplit())})</label>
+        <div data-splitwrap="src${src.id}" ${src.split ? '' : 'hidden'}>${splitEditor('src' + src.id, sp, num(src.rate), true)}
+          <button class="primary" data-savesplit="${src.id}" style="margin-top:6px">Aufteilung speichern</button></div>`;
+    }
+    // Tilgungsplan nach Jahren
+    const years = new Map();
+    pl.rows.forEach((r) => {
+      const key = pl.start ? ymFrom(ymIndex(pl.start) + r.m).slice(0, 4) : 'Jahr ' + (Math.floor(r.m / 12) + 1);
+      const y = years.get(key) || { zins: 0, tilg: 0, pay: 0, rest: 0 };
+      y.zins += r.zins; y.tilg += r.tilg; y.pay += r.pay; y.rest = r.rest; years.set(key, y);
+    });
+    const now = thisMonth().slice(0, 4);
+    html += `<details class="plan" data-plan="${src.id}" ${openPlans.has(String(src.id)) ? 'open' : ''}><summary>Tilgungsplan nach Jahren</summary>
+      <div style="overflow-x:auto"><table><thead><tr><th>Jahr</th><th class="num">Raten</th><th class="num">Zinsen</th><th class="num">Tilgung</th><th class="num">Restschuld</th></tr></thead><tbody>
+      ${[...years.entries()].map(([k, y]) => `<tr class="${k === now ? 'cur' : ''}"><td>${k}</td><td class="num">${fmt0.format(y.pay)}</td><td class="num">${fmt0.format(y.zins)}</td><td class="num">${fmt0.format(y.tilg)}</td><td class="num">${fmt0.format(y.rest)}</td></tr>`).join('')}
+      </tbody></table></div></details>`;
+    return html;
+  }
+  const openPlans = new Set();
+
+  const splitVal = (v, mode) => { const n = Math.round(num(v) * 100) / 100; return mode === 'eur' ? amtInput(n) || '0' : String(n).replace('.', ','); };
+  function splitHint(mode, sum, total) {
+    if (mode === 'eur') {
+      const ok = Math.abs(sum - total) <= 0.5;
+      return `<span class="${ok ? '' : 'neg'}">Summe ${fmt2.format(sum)} von ${fmt2.format(total)}${ok ? '' : ' – muss übereinstimmen'}</span>`;
+    }
+    const ok = Math.abs(sum - 100) <= 0.5;
+    return `<span class="${ok ? '' : 'neg'}">Summe ${pct.format(sum)} %${ok ? '' : ' – muss 100 % ergeben'}</span>`;
+  }
+  /** Editor für die Aufteilung: Prozent oder feste Beträge (€) je Person */
+  function splitEditor(prefix, sp, total, allowEur) {
     if (S.users.length < 2) return `<div class="muted small">Sobald ein zweites Konto angelegt ist, kannst du hier die Aufteilung festlegen.</div>`;
-    return `<div class="splitbox">${S.users.map((u, i) => `<label>${esc(u.display_name)} (%)<input type="number" min="0" max="100" step="1" data-split="${prefix}" data-uid="${u.id}" data-idx="${i}" value="${Math.round(num(sp[u.id]) * 100) / 100}"></label>`).join('')}
-      ${S.users.length === 2 ? `<input type="range" min="0" max="100" step="5" data-splitrange="${prefix}" value="${num(sp[S.users[0].id])}" class="full">` : ''}</div>`;
+    const mode = allowEur && sp.mode === 'eur' ? 'eur' : 'pct';
+    const sum = S.users.reduce((x, u) => x + num(sp.values[u.id]), 0);
+    return `<div class="splitbox" data-splitbox="${prefix}" data-mode="${mode}" data-total="${num(total)}" data-alloweur="${allowEur ? 1 : 0}">
+      ${allowEur ? `<div class="seg full"><button type="button" data-splitmode="pct" data-for="${prefix}" class="${mode === 'pct' ? 'on' : ''}">Prozent</button><button type="button" data-splitmode="eur" data-for="${prefix}" class="${mode === 'eur' ? 'on' : ''}">Betrag (€)</button></div>` : ''}
+      ${S.users.map((u, i) => `<label>${esc(u.display_name)} (${mode === 'eur' ? '€' : '%'})<input inputmode="decimal" data-split="${prefix}" data-uid="${u.id}" data-idx="${i}" value="${splitVal(sp.values[u.id], mode)}"></label>`).join('')}
+      ${S.users.length === 2 && mode === 'pct' ? `<input type="range" min="0" max="100" step="5" data-splitrange="${prefix}" value="${num(sp.values[S.users[0].id])}" class="full">` : ''}
+      <div class="small muted full" data-splithint="${prefix}">${splitHint(mode, sum, num(total))}</div>
+    </div>`;
   }
   function readSplit(prefix) {
-    const out = {}; let sum = 0;
-    document.querySelectorAll(`[data-split="${prefix}"]`).forEach((i) => { const v = Number(i.value); out[i.dataset.uid] = v; sum += v; });
-    return { out, sum };
+    const box = document.querySelector(`[data-splitbox="${prefix}"]`);
+    const mode = box ? box.dataset.mode : 'pct';
+    const total = box ? Number(box.dataset.total) : 0;
+    const values = {}; let sum = 0; let bad = false;
+    document.querySelectorAll(`[data-split="${prefix}"]`).forEach((i) => {
+      const v = parseAmount(i.value === '' ? '0' : i.value);
+      if (!Number.isFinite(v) || v < 0) bad = true;
+      values[i.dataset.uid] = Number.isFinite(v) ? v : 0; sum += values[i.dataset.uid];
+    });
+    const ok = !bad && (mode === 'eur' ? Math.abs(sum - total) <= 0.5 : Math.abs(sum - 100) <= 0.5);
+    return { mode, values, sum, total, ok };
+  }
+  function refreshSplitHint(prefix) {
+    const r = readSplit(prefix);
+    const h = document.querySelector(`[data-splithint="${prefix}"]`);
+    if (h) h.innerHTML = splitHint(r.mode, r.sum, r.total);
+  }
+  function setSplitTotal(prefix, total) {
+    const box = document.querySelector(`[data-splitbox="${prefix}"]`);
+    if (!box) return;
+    box.dataset.total = num(total);
+    refreshSplitHint(prefix);
+  }
+  function switchSplitMode(prefix, mode) {
+    const box = document.querySelector(`[data-splitbox="${prefix}"]`);
+    if (!box || box.dataset.mode === mode) return;
+    const r = readSplit(prefix);
+    const values = {};
+    S.users.forEach((u) => {
+      const v = num(r.values[u.id]);
+      values[u.id] = mode === 'eur' ? Math.round(r.total * v) / 100 : (r.total ? Math.round((v / r.total) * 10000) / 100 : 0);
+    });
+    box.outerHTML = splitEditor(prefix, { mode, values }, r.total, box.dataset.alloweur === '1');
   }
 
   function viewSettings() {
@@ -579,7 +772,7 @@
       <div class="card"><h2>Aufteilung &amp; Reserve</h2>
         <form id="setForm">
           <div class="small muted" style="font-weight:500">Standardaufteilung geleisteter Zahlungen</div>
-          ${splitInputs(defaultSplit(), 'def')}
+          ${splitEditor('def', defaultSplit(), 100, false)}
           <div class="muted small">Gilt für alle Positionen ohne eigene Aufteilung. Pro Position änderbar im Bearbeiten-Dialog.</div>
           <label style="margin-top:8px">Reserve für Unvorhergesehenes (%)<input name="reserve" type="number" min="0" max="100" step="0.5" value="${Math.round(num(S.settings.reserve_rate) * 1000) / 10}"></label>
           <button type="submit" class="primary">Speichern</button>
@@ -667,7 +860,7 @@
         ${S.users.length > 1 ? `<div class="full">
           <div class="small muted" style="font-weight:500;margin-bottom:4px">Aufteilung der Zahlung</div>
           <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="splitDefault" ${custom ? '' : 'checked'} style="width:auto"> Standardaufteilung verwenden (${splitLabel(defaultSplit())})</label>
-          <div id="splitCustom" ${custom ? '' : 'hidden'}>${splitInputs(splitOf(d), 'exp')}</div>
+          <div id="splitCustom" ${custom ? '' : 'hidden'}>${splitEditor('exp', splitOf(d), has(d.amount) ? num(d.amount) : num(d.estimate), true)}</div>
         </div>` : ''}
         <div class="full">
           <div class="small muted" style="font-weight:500;margin-bottom:4px">Belege (PDF, Fotos)</div>
@@ -687,6 +880,12 @@
     form.addEventListener('submit', (ev) => { ev.preventDefault(); save(); });
     $('#saveExp').onclick = save;
     if ($('#splitDefault')) $('#splitDefault').onchange = (ev) => { $('#splitCustom').hidden = ev.target.checked; };
+    // Gesamtbetrag für die €-Aufteilung folgt Angebot/Ist bzw. Schätzung
+    form.addEventListener('input', (ev) => {
+      if (ev.target.name !== 'amount' && ev.target.name !== 'estimate') return;
+      const a = parseAmount(form.amount.value), e2 = parseAmount(form.estimate.value);
+      setSplitTotal('exp', Number.isFinite(a) ? a : Number.isFinite(e2) ? e2 : 0);
+    });
     if ($('#delExp')) $('#delExp').onclick = async () => {
       const b = $('#delExp');
       if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; return; }
@@ -710,8 +909,13 @@
       let split = null;
       if ($('#splitDefault') && !$('#splitDefault').checked) {
         const r = readSplit('exp');
-        if (Math.abs(r.sum - 100) > 0.5) { $('#expErr').textContent = `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`; return; }
-        split = r.out;
+        if (!r.ok) {
+          $('#expErr').textContent = r.mode === 'eur'
+            ? `Die Beträge ergeben ${fmt2.format(r.sum)} – sie müssen zusammen ${fmt2.format(r.total)} ergeben.`
+            : `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`;
+          return;
+        }
+        split = { mode: r.mode, values: r.values };
       }
       const body = {
         code: f.get('code'), title, estimate, amount, status: f.get('status'), included: f.get('included'),
@@ -747,9 +951,19 @@
     try {
       if (t.id === 'addExp') { expenseDialog(null); return; }
       if (t.id === 'filtToggle') { filtOpen = !filtOpen; render(); return; }
+      if (t.dataset.splitmode) { switchSplitMode(t.dataset.for, t.dataset.splitmode); return; }
+      if (t.id === 'addLoan') { await mutate('POST', '/api/sources', { name: 'Neues Darlehen', kind: 'darlehen', amount: 0 }); return; }
+      if (t.dataset.savesplit) {
+        const r = readSplit('src' + t.dataset.savesplit);
+        if (!r.ok) { $('#finErr').textContent = r.mode === 'eur' ? `Die Beträge ergeben ${fmt2.format(r.sum)} – sie müssen die Rate von ${fmt2.format(r.total)} ergeben.` : `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`; return; }
+        t.blur();
+        await mutate('PUT', '/api/sources/' + t.dataset.savesplit, { split: { mode: r.mode, values: r.values } });
+        $('#finErr').textContent = '';
+        return;
+      }
       if (t.id === 'filtReset') { filt.cat = ''; filt.inc = ''; filt.st = ''; render(); return; }
       if (t.id === 'addCat') { await mutate('POST', '/api/categories', { name: 'Neuer Bereich', budget: 0 }); return; }
-      if (t.id === 'addSrc') { await mutate('POST', '/api/sources', { name: 'Neuer Baustein', amount: 0 }); return; }
+      if (t.id === 'addSrc') { await mutate('POST', '/api/sources', { name: 'Eigenkapital', kind: 'eigen', amount: 0 }); return; }
       if (t.dataset.delcat) {
         if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Löschen?'; t.classList.add('danger'); return; }
         await mutate('DELETE', '/api/categories/' + t.dataset.delcat); return;
@@ -777,15 +991,22 @@
     if (t.dataset.splitrange) {
       const ins = document.querySelectorAll(`[data-split="${t.dataset.splitrange}"]`);
       ins[0].value = t.value; ins[1].value = 100 - Number(t.value);
+      refreshSplitHint(t.dataset.splitrange);
       return;
     }
-    if (t.dataset.split && S.users.length === 2) {
-      const ins = document.querySelectorAll(`[data-split="${t.dataset.split}"]`);
-      const other = ins[t.dataset.idx === '0' ? 1 : 0];
-      const v = Math.min(100, Math.max(0, Number(t.value) || 0));
-      other.value = Math.round((100 - v) * 100) / 100;
-      const range = document.querySelector(`[data-splitrange="${t.dataset.split}"]`);
-      if (range) range.value = ins[0].value;
+    if (t.dataset.split) {
+      const prefix = t.dataset.split;
+      const box = document.querySelector(`[data-splitbox="${prefix}"]`);
+      if (S.users.length === 2 && box) {
+        const ins = document.querySelectorAll(`[data-split="${prefix}"]`);
+        const other = ins[t.dataset.idx === '0' ? 1 : 0];
+        const whole = box.dataset.mode === 'eur' ? Number(box.dataset.total) : 100;
+        const v = parseAmount(t.value);
+        if (Number.isFinite(v)) other.value = splitVal(Math.max(0, whole - v), box.dataset.mode);
+        const range = document.querySelector(`[data-splitrange="${prefix}"]`);
+        if (range) range.value = parseAmount(ins[0].value) || 0;
+      }
+      refreshSplitHint(prefix);
       return;
     }
     if (t.id === 'fq') {
@@ -814,13 +1035,27 @@
       catch (err) { $('#catErr').textContent = err.message; }
       return;
     }
+    if (t.dataset.splitdef) {
+      const id = t.dataset.splitdef.replace('src', '');
+      const wrap = document.querySelector(`[data-splitwrap="${t.dataset.splitdef}"]`);
+      if (t.checked) { try { t.blur(); await mutate('PUT', '/api/sources/' + id, { split: null }); } catch (err) { $('#finErr').textContent = err.message; } }
+      else if (wrap) wrap.hidden = false;
+      return;
+    }
     if (t.dataset.src) {
       const s = S.sources.find((x) => x.id === Number(t.dataset.src)); if (!s) return;
-      let v = t.value;
-      if (t.dataset.f === 'amount') { v = v.trim() === '' ? 0 : parseAmount(v); if (!Number.isFinite(v)) { $('#finErr').textContent = 'Betrag nicht erkannt.'; return; } }
-      if (s[t.dataset.f] === v) return;
-      try { await mutate('PUT', '/api/sources/' + s.id, { [t.dataset.f]: v }); $('#finErr').textContent = ''; }
-      catch (err) { $('#finErr').textContent = err.message; }
+      const fld = t.dataset.f; let v = t.value;
+      const err = (m) => { $('#finErr').textContent = m; };
+      if (fld === 'amount' || fld === 'rate') { v = v.trim() === '' ? (fld === 'rate' ? null : 0) : parseAmount(v); if (Number.isNaN(v)) return err('Betrag nicht erkannt.'); }
+      else if (fld === 'interest') { v = parseNum(v); if (Number.isNaN(v)) return err('Zinssatz nicht erkannt (z. B. 3,45).'); }
+      else if (fld === 'fixed_years' || fld === 'grace_months') { v = v.trim() === '' ? null : Number(v); if (v != null && !Number.isInteger(v)) return err('Bitte eine ganze Zahl eingeben.'); }
+      else if (fld === 'start') { v = parseMonth(v); if (v === null) return err('Erste Rate bitte als Monat angeben, z. B. 03.2027.'); }
+      if ((s[fld] ?? null) === v) return;
+      const body = { [fld]: v };
+      // Aufteilung in € passt nach Ratenänderung nicht mehr → auf Standard zurück
+      if (fld === 'rate' && s.split && normSplit(s.split).mode === 'eur') body.split = null;
+      try { if (fld === 'kind') t.blur(); await mutate('PUT', '/api/sources/' + s.id, body); err(''); }
+      catch (e2) { err(e2.message); }
     }
   });
 
@@ -832,8 +1067,8 @@
       const body = { reserve_rate: Number(new FormData(f).get('reserve')) / 100 };
       if (S.users.length > 1) {
         const r = readSplit('def');
-        if (Math.abs(r.sum - 100) > 0.5) { $('#setErr').textContent = `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`; return; }
-        body.default_split = r.out;
+        if (!r.ok) { $('#setErr').textContent = `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`; return; }
+        body.default_split = { mode: 'pct', values: r.values };
       }
       try { await mutate('PUT', '/api/settings', body); const ok = $('#setOk'); if (ok) ok.textContent = 'Gespeichert.'; }
       catch (e) { $('#setErr').textContent = e.message; }

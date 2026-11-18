@@ -4,9 +4,9 @@ Budget, Angebote, Rechnungen, Belege und Finanzierung für unseren Hausbau – s
 
 - **Übersicht:** Gesamtbudget inkl. Reserve, Bezahlt, Beauftragt, Worst Case, Finanzierungspuffer, Kosten je Bereich, Gezahlt nach Person, offene Zahlungen und Entscheidungen
 - **Kosten:** Positionen nach Bereichen (A–H) wie in der Excel-Kostenübersicht – Nr, Kostenpunkt, *Im Hauspreis? (Nein/Ja/Prüfen)*, Schätzung, Angebot/Ist, Differenz, Status *Geplant → Angebot → Beauftragt → Bezahlt* (oder *Option*), Hinweis, Info mit klickbaren Links, Belege (PDF/Fotos)
-- **Aufteilung der Zahlungen:** Standard 50:50 (in den Einstellungen änderbar), pro Position abweichend einstellbar; die Übersicht zeigt, wer wie viel gezahlt hat und die Abweichung vom Soll
+- **Aufteilung der Zahlungen:** Standard 50:50 (in den Einstellungen änderbar), pro Position abweichend in **Prozent oder als feste €-Beträge**; die Übersicht zeigt, wer wie viel gezahlt hat und die Abweichung vom Soll
 - **Bereiche & Budget:** Schätzung, Angebot/Ist, Prognose, optionaler Budgetrahmen, Reserve-Kennzeichen je Bereich
-- **Finanzierung:** Eigenkapital, KfW, Bankdarlehen … gegen Bedarf und Worst Case
+- **Finanzierung:** Eigenkapital und Darlehen gegen Bedarf und Worst Case. Je Darlehen: Sollzins, Monatsrate, erste Rate, Zinsbindung, tilgungsfreie Monate, Aufteilung der Rate (% oder €). Berechnet werden anfängliche Tilgung, bezahlte Zinsen und Tilgung bis heute, Restschuld heute und am Ende der Zinsbindung, Gesamtzinsen, Schuldenfreiheit sowie ein Tilgungsplan nach Jahren (Annuität, monatliche Verzinsung; Annahme: pünktliche Raten)
 - **Einstellungen:** Reserve-Satz, Standardaufteilung, Konten, Import/Export (JSON, CSV), Backups
 
 ## Rechenlogik (wie in der Excel-Kostenübersicht)

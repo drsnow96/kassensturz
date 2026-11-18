@@ -26,6 +26,7 @@ const MAX_UPLOAD = (Number(process.env.MAX_UPLOAD_MB) || 25) * 1024 * 1024;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const STATUSES = ['geplant', 'option', 'angebot', 'beauftragt', 'bezahlt'];
 const INCLUDED = ['nein', 'ja', 'pruefen'];
+const SOURCE_KINDS = ['eigen', 'darlehen', 'sonstig'];
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -155,6 +156,18 @@ const MIGRATIONS = [
   ALTER TABLE categories ADD COLUMN reserve INTEGER NOT NULL DEFAULT 1;
   UPDATE categories SET reserve = 0 WHERE name LIKE 'Grundstück%' OR name LIKE 'Haus (%' OR name LIKE 'Reserve%';
   INSERT INTO meta (key, value) VALUES ('reserve_rate', '0.1') ON CONFLICT(key) DO NOTHING;
+  `,
+
+  // 3 – Darlehen: Zins, Monatsrate, erste Rate, Zinsbindung, tilgungsfreie Monate, Aufteilung der Rate
+  `
+  ALTER TABLE sources ADD COLUMN kind TEXT NOT NULL DEFAULT 'eigen';
+  ALTER TABLE sources ADD COLUMN interest REAL;
+  ALTER TABLE sources ADD COLUMN rate REAL;
+  ALTER TABLE sources ADD COLUMN start TEXT NOT NULL DEFAULT '';
+  ALTER TABLE sources ADD COLUMN fixed_years INTEGER;
+  ALTER TABLE sources ADD COLUMN grace_months INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE sources ADD COLUMN split TEXT;
+  UPDATE sources SET kind = 'darlehen' WHERE name LIKE 'KfW%' OR name LIKE '%darlehen%' OR name LIKE '%Darlehen%';
   `,
 ];
 
@@ -404,7 +417,7 @@ function state(user) {
     users: db.prepare('SELECT id, username, display_name FROM users ORDER BY id').all(),
     categories: db.prepare('SELECT * FROM categories ORDER BY sort, id').all(),
     expenses,
-    sources: db.prepare('SELECT * FROM sources ORDER BY sort, id').all(),
+    sources: db.prepare('SELECT * FROM sources ORDER BY sort, id').all().map((x) => ({ ...x, split: parseJson(x.split) })),
   };
 }
 
@@ -413,21 +426,32 @@ function optAmount(v) {
   return amount(v);
 }
 
-/** Aufteilung {userId: Prozent} prüfen; null = Standardaufteilung */
-function splitFromBody(v) {
+/**
+ * Aufteilung prüfen und normalisieren auf {mode: 'pct'|'eur', values: {userId: Zahl}}.
+ * Akzeptiert auch das alte Format {userId: Prozent}. null = Standardaufteilung.
+ * Bei 'eur' müssen die Beträge zusammen `total` ergeben (falls angegeben).
+ */
+function splitFromBody(v, total) {
   if (v == null || v === '') return null;
   if (typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, 'Ungültige Aufteilung');
-  const out = {}; let sum = 0;
-  for (const [k, raw] of Object.entries(v)) {
-    const id = Number(k); const pct = Number(raw);
-    if (!Number.isInteger(id) || !Number.isFinite(pct) || pct < 0 || pct > 100) throw new HttpError(400, 'Ungültige Aufteilung');
+  const mode = v.mode === 'eur' ? 'eur' : 'pct';
+  const raw = v.mode ? v.values : v;
+  if (!raw || typeof raw !== 'object') throw new HttpError(400, 'Ungültige Aufteilung');
+  const values = {}; let sum = 0;
+  for (const [k, r] of Object.entries(raw)) {
+    const id = Number(k); const n = Number(r);
+    if (!Number.isInteger(id) || !Number.isFinite(n) || n < 0 || (mode === 'pct' && n > 100) || n > 1e10) throw new HttpError(400, 'Ungültige Aufteilung');
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) continue;
-    out[id] = Math.round(pct * 100) / 100; sum += out[id];
+    values[id] = Math.round(n * 100) / 100; sum += values[id];
   }
-  if (!Object.keys(out).length) return null;
-  if (Math.abs(sum - 100) > 0.5) throw new HttpError(400, 'Die Aufteilung muss zusammen 100 % ergeben');
-  return out;
+  if (!Object.keys(values).length) return null;
+  if (mode === 'pct' && Math.abs(sum - 100) > 0.5) throw new HttpError(400, 'Die Aufteilung muss zusammen 100 % ergeben');
+  if (mode === 'eur' && total != null && Math.abs(sum - total) > 0.5) {
+    throw new HttpError(400, `Die Beträge ergeben ${sum.toFixed(2).replace('.', ',')} € – sie müssen zusammen ${Number(total).toFixed(2).replace('.', ',')} € ergeben`);
+  }
+  return { mode, values };
 }
+const parseJson = (t) => { try { return t ? JSON.parse(t) : null; } catch { return null; } };
 
 function expenseFromBody(b) {
   const title = str(b.title, 200);
@@ -441,9 +465,9 @@ function expenseFromBody(b) {
     estimate: optAmount(b.estimate), amount: optAmount(b.amount),
     vendor: str(b.vendor, 200), date: date(b.date), due: date(b.due),
     hint: str(b.hint, 2000), note: str(b.note, 4000),
-    split: splitFromBody(b.split),
   };
   if (e.estimate == null && e.amount == null) throw new HttpError(400, 'Bitte Schätzung oder Angebot/Ist angeben');
+  e.split = splitFromBody(b.split, e.amount != null ? e.amount : e.estimate);
   return e;
 }
 
@@ -545,7 +569,7 @@ function jsonExport() {
       category: e.category_id == null ? null : String(e.category_id), code: e.code, title: e.title, estimate: e.estimate, amount: e.amount,
       status: e.status, included: e.included, vendor: e.vendor, date: e.date, due: e.due, hint: e.hint, note: e.note,
     })),
-    sources: db.prepare('SELECT name, amount, note FROM sources ORDER BY sort, id').all(),
+    sources: db.prepare('SELECT name, amount, note, kind, interest, rate, start, fixed_years, grace_months FROM sources ORDER BY sort, id').all(),
   };
 }
 
@@ -712,8 +736,9 @@ async function api(req, res, url) {
   if (p === '/api/sources' && m === 'POST') {
     const b = await readJson(req);
     const sort = (db.prepare('SELECT MAX(sort) AS s FROM sources').get().s || 0) + 10;
-    const r = db.prepare('INSERT INTO sources (name, amount, note, sort) VALUES (?, ?, ?, ?)')
-      .run(str(b.name, 120) || 'Neuer Baustein', amount(b.amount, false), str(b.note, 500), sort);
+    const kind = SOURCE_KINDS.includes(b.kind) ? b.kind : 'eigen';
+    const r = db.prepare('INSERT INTO sources (name, amount, note, sort, kind) VALUES (?, ?, ?, ?, ?)')
+      .run(str(b.name, 120) || (kind === 'darlehen' ? 'Neues Darlehen' : 'Neuer Baustein'), amount(b.amount, false), str(b.note, 500), sort, kind);
     bump();
     return send(res, 200, { id: Number(r.lastInsertRowid) });
   }
@@ -723,10 +748,34 @@ async function api(req, res, url) {
     if (!s) throw new HttpError(404, 'Baustein nicht gefunden');
     if (m === 'PUT') {
       const b = await readJson(req);
-      const name = b.name !== undefined ? str(b.name, 120) : s.name;
+      const pick = (k, fn) => (b[k] !== undefined ? fn(b[k]) : s[k]);
+      const name = pick('name', (v) => str(v, 120));
       if (!name) throw new HttpError(400, 'Name fehlt');
-      db.prepare('UPDATE sources SET name = ?, amount = ?, note = ? WHERE id = ?')
-        .run(name, b.amount !== undefined ? amount(b.amount, false) : s.amount, b.note !== undefined ? str(b.note, 500) : s.note, id);
+      const kind = pick('kind', (v) => (SOURCE_KINDS.includes(v) ? v : 'eigen'));
+      const interest = pick('interest', (v) => {
+        if (v === '' || v == null) return null;
+        const n = Number(v); if (!Number.isFinite(n) || n < 0 || n > 25) throw new HttpError(400, 'Sollzins muss zwischen 0 und 25 % liegen');
+        return Math.round(n * 1000) / 1000;
+      });
+      const rate = pick('rate', (v) => optAmount(v));
+      const start = pick('start', (v) => {
+        const t = str(v, 7);
+        if (t && !/^\d{4}-(0[1-9]|1[0-2])$/.test(t)) throw new HttpError(400, 'Erste Rate bitte als Monat angeben (z. B. 03.2027)');
+        return t;
+      });
+      const intIn = (lo, hi, label) => (v) => {
+        if (v === '' || v == null) return null;
+        const n = Number(v); if (!Number.isInteger(n) || n < lo || n > hi) throw new HttpError(400, `${label}: ${lo}–${hi}`);
+        return n;
+      };
+      const fixedYears = pick('fixed_years', intIn(0, 40, 'Zinsbindung in Jahren'));
+      const grace = b.grace_months !== undefined ? (intIn(0, 120, 'Tilgungsfreie Monate')(b.grace_months) || 0) : s.grace_months;
+      const amt = pick('amount', (v) => amount(v, false));
+      const note = pick('note', (v) => str(v, 500));
+      const split = b.split !== undefined ? splitFromBody(b.split, rate) : parseJson(s.split);
+      db.prepare(`UPDATE sources SET name = ?, amount = ?, note = ?, kind = ?, interest = ?, rate = ?, start = ?, fixed_years = ?,
+                  grace_months = ?, split = ? WHERE id = ?`)
+        .run(name, amt, note, kind, interest, rate, start, fixedYears, grace, split ? JSON.stringify(split) : null, id);
       bump();
       return send(res, 200, { ok: true });
     }
@@ -795,6 +844,7 @@ async function api(req, res, url) {
     }
     if (b.default_split !== undefined) {
       const sp = splitFromBody(b.default_split);
+      if (sp && sp.mode !== 'pct') throw new HttpError(400, 'Die Standardaufteilung wird in Prozent angegeben');
       setMeta('default_split', sp ? JSON.stringify(sp) : 'null');
     }
     bump();
