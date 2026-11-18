@@ -772,7 +772,8 @@ async function api(req, res, url) {
       const grace = b.grace_months !== undefined ? (intIn(0, 120, 'Tilgungsfreie Monate')(b.grace_months) || 0) : s.grace_months;
       const amt = pick('amount', (v) => amount(v, false));
       const note = pick('note', (v) => str(v, 500));
-      const split = b.split !== undefined ? splitFromBody(b.split, rate) : parseJson(s.split);
+      // Aufteilung bezieht sich bei Darlehen auf die Monatsrate, sonst auf den Betrag (wer bringt wie viel ein)
+      const split = b.split !== undefined ? splitFromBody(b.split, kind === 'darlehen' ? rate : amt) : parseJson(s.split);
       db.prepare(`UPDATE sources SET name = ?, amount = ?, note = ?, kind = ?, interest = ?, rate = ?, start = ?, fixed_years = ?,
                   grace_months = ?, split = ? WHERE id = ?`)
         .run(name, amt, note, kind, interest, rate, start, fixedYears, grace, split ? JSON.stringify(split) : null, id);

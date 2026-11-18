@@ -227,3 +227,4 @@ body.mobile .loanstats{grid-template-columns:1fr 1fr}
 body.mobile .seg button{min-height:40px;padding:6px 14px}
 .srccard .mrow > input{min-width:0;width:auto}
 .srccard{min-width:0}
+.mcard .strong{font-weight:700;font-variant-numeric:tabular-nums}

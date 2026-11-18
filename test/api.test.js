@@ -215,6 +215,13 @@ test('Migration v1 → v2 behält Daten, Import und Aufteilung funktionieren', a
     assert.equal(k2.rate, 500); assert.equal(k2.interest, 2.5); assert.equal(k2.start, '2027-03');
     assert.equal(k2.grace_months, 12); assert.equal(k2.split.values[ids[0]], 300);
 
+    // Eigenkapital: wer bringt wie viel ein (Bezug = Betrag)
+    const eqSrc = st2.body.sources.find((x) => x.kind === 'eigen');
+    r = await call('PUT', `/api/sources/${eqSrc.id}`, { amount: 50000, split: { mode: 'eur', values: { [ids[0]]: 30000, [ids[1]]: 20000 } } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    r = await call('PUT', `/api/sources/${eqSrc.id}`, { split: { mode: 'eur', values: { [ids[0]]: 30000, [ids[1]]: 10000 } } });
+    assert.equal(r.status, 400, 'Eigenkapital-Aufteilung muss den Betrag ergeben');
+
     // Import (Beispieldaten, keine echten Werte) – zweimal, darf nicht verdoppeln
     const imp = {
       format: 'kassensturz-import', version: 1, replace_empty_categories: true, settings: { reserve_rate: 0.1 },

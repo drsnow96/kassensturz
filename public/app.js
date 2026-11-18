@@ -287,6 +287,17 @@
     };
   }
   function loans() { return S.sources.filter((x) => x.kind === 'darlehen'); }
+  /** Eigenkapital und Sonstiges: wer bringt wie viel ein */
+  function equityByUser() {
+    const out = Object.fromEntries(S.users.map((u) => [u.id, 0]));
+    let total = 0;
+    S.sources.filter((x) => x.kind !== 'darlehen').forEach((x) => {
+      const a = num(x.amount); total += a;
+      const sh = shareAmounts(splitOf(x), a);
+      S.users.forEach((u) => { out[u.id] += sh[u.id]; });
+    });
+    return { out, total };
+  }
   function loanTotals() {
     const t = { rate: 0, restToday: 0, zinsPaid: 0, tilgPaid: 0, paid: 0, perUser: Object.fromEntries(S.users.map((u) => [u.id, { rate: 0, paid: 0, zins: 0, tilg: 0 }])) };
     loans().forEach((s) => {
@@ -381,10 +392,12 @@
       const target = defaultSplit().values;
       const lt = loanTotals();
       const hasLoans = loans().some((x) => num(x.rate) > 0);
+      const eqU = equityByUser();
       html += `<div class="card"><h2>Gezahlt nach Person</h2><table><tbody>${S.users.map((u) => {
         const diff = out[u.id] - total * num(target[u.id]) / 100;
         const lu = lt.perUser[u.id];
         return `<tr><td>${esc(u.display_name)}<div class="muted small">Soll ${pct.format(num(target[u.id]))} %</div>
+            ${eqU.total ? `<div class="muted small">Eigenkapital ${fmt0.format(eqU.out[u.id])}</div>` : ''}
             ${hasLoans ? `<div class="muted small">Kreditrate ${fmt0.format(lu.rate)} / Monat</div>` : ''}</td>
           <td class="num">${fmt0.format(out[u.id])}
           ${S.users.length > 1 && Math.abs(diff) >= 1 ? `<div class="small ${diff > 0 ? 'pos' : 'neg'}">${diff > 0 ? '+' : '−'}${fmt0.format(Math.abs(diff))} ggü. Soll</div>` : ''}
@@ -622,20 +635,14 @@
       ${hasLoans ? kpi('Monatliche Rate', fmt0.format(lt.rate), 'alle Darlehen') : ''}
       ${hasLoans ? kpi('Restschuld heute', fmt0.format(lt.restToday), `Zinsen bisher ${fmt0.format(lt.zinsPaid)} · Tilgung ${fmt0.format(lt.tilgPaid)}`) : ''}
     </div>
-    <div class="grid two">
-      <div class="card"><h2>Finanzierung vs. Bedarf</h2>
-        <div class="small muted">Finanzierung</div><div class="finbar"><div style="width:${((ft / maxv) * 100).toFixed(1)}%;background:var(--paid)"></div></div>
-        <div class="small muted">Bedarf (Gesamtbudget)</div><div class="finbar"><div style="width:${((t.gesamt / maxv) * 100).toFixed(1)}%;background:var(--comm)"></div></div>
-        <div class="small muted">Worst Case</div><div class="finbar"><div style="width:${((t.worst / maxv) * 100).toFixed(1)}%;background:var(--offer)"></div></div>
-      </div>`;
-    if (hasLoans && S.users.length) {
-      html += `<div class="card"><h2>Kreditraten je Person</h2><table><thead><tr><th></th><th class="num">pro Monat</th><th class="num">bisher</th><th class="num">davon Zinsen</th></tr></thead><tbody>
-        ${S.users.map((u) => { const p = lt.perUser[u.id]; return `<tr><td>${esc(u.display_name)}</td><td class="num">${fmt0.format(p.rate)}</td><td class="num">${fmt0.format(p.paid)}</td><td class="num">${fmt0.format(p.zins)}</td></tr>`; }).join('')}
-        </tbody><tfoot><tr><td>Summe</td><td class="num">${fmt0.format(lt.rate)}</td><td class="num">${fmt0.format(lt.paid)}</td><td class="num">${fmt0.format(lt.zinsPaid)}</td></tr></tfoot></table>
-        <div class="muted small" style="margin-top:6px">Annahme: Raten werden ab der ersten Rate monatlich pünktlich gezahlt.</div></div>`;
-    } else html += `<div></div>`;
-    html += `</div>
-    <div class="toolbar" style="margin-top:18px"><h2 style="margin:0">Finanzierungsbausteine</h2><span class="spacer"></span>
+    ${S.users.length ? personSpending(lt, hasLoans) : ''}
+    <div class="card" style="margin-top:14px"><h2>Finanzierung vs. Bedarf</h2>
+      <div class="small muted">Finanzierung</div><div class="finbar"><div style="width:${((ft / maxv) * 100).toFixed(1)}%;background:var(--paid)"></div></div>
+      <div class="small muted">Bedarf (Gesamtbudget)</div><div class="finbar"><div style="width:${((t.gesamt / maxv) * 100).toFixed(1)}%;background:var(--comm)"></div></div>
+      <div class="small muted">Worst Case</div><div class="finbar"><div style="width:${((t.worst / maxv) * 100).toFixed(1)}%;background:var(--offer)"></div></div>
+    </div>
+`;
+    html += `<div class="toolbar" style="margin-top:18px"><h2 style="margin:0">Finanzierungsbausteine</h2><span class="spacer"></span>
       <button id="addSrc">+ Eigenkapital / Sonstiges</button><button class="primary" id="addLoan">+ Darlehen</button></div>
     <div class="err" id="finErr"></div>
     <div class="srcgrid" data-live>`;
@@ -643,6 +650,47 @@
     if (!S.sources.length) html += `<div class="empty">Noch keine Finanzierungsbausteine.</div>`;
     html += `</div>
     <div class="note"><b>KfW 297 „Klimafreundlicher Neubau“ (selbstgenutzt):</b> Kredit bis 100.000 € je Wohneinheit, mit QNG-Nachhaltigkeitssiegel bis 150.000 €, oft mit tilgungsfreien Anlaufjahren. Konditionen ändern sich regelmäßig – aktuellen Zinssatz bei der Hausbank bzw. auf kfw.de/297 prüfen.</div>`;
+    return html;
+  }
+
+  /** Wer hat wie viel für das Projekt ausgegeben? Bezahlte Positionen + gezahlte Kreditraten, dazu Eigenkapital */
+  function personSpending(lt, hasLoans) {
+    const pos = paidByUser();
+    const eq = equityByUser();
+    const rows = S.users.map((u) => {
+      const l = lt.perUser[u.id];
+      const spent = pos.out[u.id] + l.paid;
+      return { u, pos: pos.out[u.id], raten: l.paid, zins: l.zins, tilg: l.tilg, spent, eq: eq.out[u.id], rate: l.rate };
+    });
+    const total = rows.reduce((x, r) => x + r.spent, 0);
+    const share = (v) => (total ? pct.format((v / total) * 100) + ' %' : '–');
+    const sum = (k) => fmt0.format(rows.reduce((x, r) => x + r[k], 0));
+    let html = `<div class="card" style="margin-top:14px"><h2>Wer hat wie viel ausgegeben?</h2>`;
+    if (mobile) {
+      html += rows.map((r) => `<div class="mcard">
+        <div class="top"><span class="ttl">${esc(r.u.display_name)}</span><span class="strong">${fmt0.format(r.spent)}</span><span class="muted small">${share(r.spent)}</span></div>
+        <div class="mstats">
+          <div><small>Bezahlte Positionen</small>${fmt0.format(r.pos)}</div>
+          ${hasLoans ? `<div><small>Kreditraten bisher</small>${fmt0.format(r.raten)}</div>
+          <div><small>davon Zinsen</small>${fmt0.format(r.zins)}</div>
+          <div><small>davon Tilgung</small>${fmt0.format(r.tilg)}</div>
+          <div><small>Rate pro Monat</small>${fmt0.format(r.rate)}</div>` : ''}
+          <div><small>Eigenkapital eingebracht</small>${fmt0.format(r.eq)}</div>
+        </div></div>`).join('')
+        + `<div class="mtotal b"><span>Zusammen ausgegeben</span><span>${fmt0.format(total)}</span></div>`;
+    } else {
+      html += `<div style="overflow-x:auto"><table><thead><tr><th></th><th class="num">Bezahlte Positionen</th>
+        ${hasLoans ? '<th class="num">Kreditraten bisher</th><th class="num">davon Zinsen</th><th class="num">davon Tilgung</th>' : ''}
+        <th class="num">Ausgegeben gesamt</th><th class="num">Anteil</th><th class="num">Eigenkapital eingebracht</th>${hasLoans ? '<th class="num">Rate / Monat</th>' : ''}</tr></thead><tbody>
+        ${rows.map((r) => `<tr><td>${esc(r.u.display_name)}</td><td class="num">${fmt0.format(r.pos)}</td>
+          ${hasLoans ? `<td class="num">${fmt0.format(r.raten)}</td><td class="num muted">${fmt0.format(r.zins)}</td><td class="num muted">${fmt0.format(r.tilg)}</td>` : ''}
+          <td class="num"><b>${fmt0.format(r.spent)}</b></td><td class="num">${share(r.spent)}</td><td class="num">${fmt0.format(r.eq)}</td>
+          ${hasLoans ? `<td class="num">${fmt0.format(r.rate)}</td>` : ''}</tr>`).join('')}
+        </tbody><tfoot><tr><td>Zusammen</td><td class="num">${sum('pos')}</td>
+          ${hasLoans ? `<td class="num">${sum('raten')}</td><td class="num">${sum('zins')}</td><td class="num">${sum('tilg')}</td>` : ''}
+          <td class="num">${fmt0.format(total)}</td><td></td><td class="num">${sum('eq')}</td>${hasLoans ? `<td class="num">${sum('rate')}</td>` : ''}</tr></tfoot></table></div>`;
+    }
+    html += `<div class="muted small" style="margin-top:8px">Ausgegeben = Positionen mit Status „Bezahlt“ (nach ihrer Aufteilung) plus gezahlte Kreditraten${hasLoans ? ' (Annahme: pünktlich ab der ersten Rate)' : ''}. Eigenkapital ist das, was jede/r an Mitteln einbringt – Aufteilung im jeweiligen Baustein.</div></div>`;
     return html;
   }
 
@@ -664,6 +712,7 @@
     }
     html += `</div>${f('Notiz (Bank, Vertragsnr. …)', 'note', src.note || '')}`;
     if (isLoan) html += loanDetails(src);
+    else if (S.users.length > 1) html += splitSection(src, num(src.amount), 'Wer bringt das ein?', '');
     html += `<div class="mrow" style="margin-top:10px;justify-content:flex-end"><button class="iconbtn" data-delsrc="${src.id}">Entfernen</button></div></div>`;
     return html;
   }
@@ -685,15 +734,7 @@
       ${pl.fixEnd ? cell(`Restschuld Ende Zinsbindung${pl.fixEnd.ym ? ' ' + fmonth(pl.fixEnd.ym) : ''}`, fmt0.format(pl.fixEnd.rest), 'strong') : cell('Zinsbindung', 'nicht angegeben')}
       ${pl.fixEnd ? cell('Zinsen bis Ende Zinsbindung', fmt0.format(pl.fixEnd.zins)) : ''}
     </div>`;
-    if (S.users.length > 1) {
-      const sp = splitOf(src);
-      const sh = shareAmounts(sp, num(src.rate));
-      html += `<div class="small muted" style="font-weight:500;margin-top:12px">Aufteilung der Rate</div>
-        <div class="small">${S.users.map((u) => `${esc(u.display_name)}: <b>${fmt0.format(sh[u.id])}</b>`).join(' · ')} pro Monat</div>
-        <label class="mrow small muted" style="margin-top:6px"><input type="checkbox" data-splitdef="src${src.id}" ${src.split ? '' : 'checked'}> Standardaufteilung (${splitLabel(defaultSplit())})</label>
-        <div data-splitwrap="src${src.id}" ${src.split ? '' : 'hidden'}>${splitEditor('src' + src.id, sp, num(src.rate), true)}
-          <button class="primary" data-savesplit="${src.id}" style="margin-top:6px">Aufteilung speichern</button></div>`;
-    }
+    if (S.users.length > 1) html += splitSection(src, num(src.rate), 'Aufteilung der Rate', ' pro Monat');
     // Tilgungsplan nach Jahren
     const years = new Map();
     pl.rows.forEach((r) => {
@@ -709,6 +750,16 @@
     return html;
   }
   const openPlans = new Set();
+
+  function splitSection(src, total, title, suffix) {
+    const sp = splitOf(src);
+    const sh = shareAmounts(sp, total);
+    return `<div class="small muted" style="font-weight:500;margin-top:12px">${title}</div>
+      <div class="small">${S.users.map((u) => `${esc(u.display_name)}: <b>${fmt0.format(sh[u.id])}</b>`).join(' · ')}${suffix}</div>
+      <label class="mrow small muted" style="margin-top:6px"><input type="checkbox" data-splitdef="src${src.id}" ${src.split ? '' : 'checked'}> Standardaufteilung (${splitLabel(defaultSplit())})</label>
+      <div data-splitwrap="src${src.id}" ${src.split ? '' : 'hidden'}>${splitEditor('src' + src.id, sp, total, true)}
+        <button class="primary" data-savesplit="${src.id}" style="margin-top:6px">Aufteilung speichern</button></div>`;
+  }
 
   const splitVal = (v, mode) => { const n = Math.round(num(v) * 100) / 100; return mode === 'eur' ? amtInput(n) || '0' : String(n).replace('.', ','); };
   function splitHint(mode, sum, total) {
@@ -955,7 +1006,7 @@
       if (t.id === 'addLoan') { await mutate('POST', '/api/sources', { name: 'Neues Darlehen', kind: 'darlehen', amount: 0 }); return; }
       if (t.dataset.savesplit) {
         const r = readSplit('src' + t.dataset.savesplit);
-        if (!r.ok) { $('#finErr').textContent = r.mode === 'eur' ? `Die Beträge ergeben ${fmt2.format(r.sum)} – sie müssen die Rate von ${fmt2.format(r.total)} ergeben.` : `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`; return; }
+        if (!r.ok) { $('#finErr').textContent = r.mode === 'eur' ? `Die Beträge ergeben ${fmt2.format(r.sum)} – sie müssen zusammen ${fmt2.format(r.total)} ergeben.` : `Die Aufteilung ergibt ${pct.format(r.sum)} % – sie muss 100 % ergeben.`; return; }
         t.blur();
         await mutate('PUT', '/api/sources/' + t.dataset.savesplit, { split: { mode: r.mode, values: r.values } });
         $('#finErr').textContent = '';
@@ -1053,7 +1104,8 @@
       if ((s[fld] ?? null) === v) return;
       const body = { [fld]: v };
       // Aufteilung in € passt nach Ratenänderung nicht mehr → auf Standard zurück
-      if (fld === 'rate' && s.split && normSplit(s.split).mode === 'eur') body.split = null;
+      const ref = s.kind === 'darlehen' ? 'rate' : 'amount';
+      if ((fld === ref || fld === 'kind') && s.split && normSplit(s.split).mode === 'eur') body.split = null;
       try { if (fld === 'kind') t.blur(); await mutate('PUT', '/api/sources/' + s.id, body); err(''); }
       catch (e2) { err(e2.message); }
     }
