@@ -1,0 +1,34 @@
+# Kassensturz auf der Synology DS723
+# In Container Manager: Projekt → Erstellen → Pfad /volume1/docker/kassensturz → diese Datei einfügen.
+services:
+  kassensturz:
+    image: ghcr.io/drsnow96/kassensturz:latest
+    container_name: kassensturz
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    environment:
+      - TZ=Europe/Berlin
+      - PUID=1026        # per SSH mit `id <dein-benutzer>` prüfen
+      - PGID=100
+      - KEEP_BACKUPS=10
+    volumes:
+      # Hier liegen ALLE Daten: Datenbank, Belege, Backups. Bleibt bei Updates erhalten.
+      - /volume1/docker/kassensturz/data:/data
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  # Holt neue Releases automatisch (gepflegter Fork des archivierten containrrr/watchtower)
+  watchtower:
+    image: nickfedor/watchtower:latest
+    container_name: kassensturz-watchtower
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Berlin
+      - WATCHTOWER_LABEL_ENABLE=true      # nur Container mit Label aktualisieren
+      - WATCHTOWER_CLEANUP=true           # alte Images aufräumen
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *   # täglich 04:00 Uhr
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Zugangsdaten für das private GitHub-Image (entsteht durch `sudo docker login ghcr.io`, siehe README)
+      - /root/.docker/config.json:/config.json:ro

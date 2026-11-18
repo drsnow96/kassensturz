@@ -1,0 +1,12 @@
+# Nutzdaten – gehören NIE ins Repository
+data/
+backups/
+belege/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.csv
+*.pdf
+.env
+node_modules/
+.DS_Store

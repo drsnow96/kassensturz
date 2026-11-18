@@ -1,0 +1,9 @@
+data/
+backups/
+*.sqlite
+*.sqlite-*
+*.csv
+node_modules/
+.git/
+.github/
+test/
