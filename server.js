@@ -13,6 +13,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const ocr = require('./ocr');
+const docs = require('./docs');
+const mail = require('./mail');
 
 const VERSION = require('./package.json').version;
 const PORT = Number(process.env.PORT) || 8080;
@@ -169,6 +171,61 @@ const MIGRATIONS = [
   ALTER TABLE sources ADD COLUMN grace_months INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE sources ADD COLUMN split TEXT;
   UPDATE sources SET kind = 'darlehen' WHERE name LIKE 'KfW%' OR name LIKE '%darlehen%' OR name LIKE '%Darlehen%';
+  `,
+
+  // 4 – Gewährleistung je Position, Entscheidungen & Szenarien, Leistungsbeschreibungen, Eingang (E-Mail)
+  `
+  ALTER TABLE expenses ADD COLUMN warranty_start TEXT NOT NULL DEFAULT '';
+  ALTER TABLE expenses ADD COLUMN warranty_months INTEGER;
+  ALTER TABLE expenses ADD COLUMN warranty_note TEXT NOT NULL DEFAULT '';
+  CREATE TABLE decisions (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    options TEXT NOT NULL DEFAULT '[]',
+    sort INTEGER NOT NULL DEFAULT 0,
+    decided_option TEXT,
+    decided_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE scenarios (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    choices TEXT NOT NULL DEFAULT '{}',
+    sort INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE documents (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    vendor TEXT NOT NULL DEFAULT '',
+    filename TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    stored_name TEXT NOT NULL UNIQUE,
+    text TEXT NOT NULL,
+    pages INTEGER NOT NULL DEFAULT 0,
+    method TEXT NOT NULL DEFAULT '',
+    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    uploaded_at TEXT NOT NULL
+  );
+  CREATE TABLE inbox (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'mail',
+    mail_from TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    received_at TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    stored_name TEXT NOT NULL UNIQUE,
+    scan TEXT,
+    status TEXT NOT NULL DEFAULT 'neu',
+    expense_id INTEGER REFERENCES expenses(id) ON DELETE SET NULL,
+    message_key TEXT NOT NULL DEFAULT ''
+  );
+  CREATE INDEX idx_inbox_status ON inbox(status);
+  CREATE INDEX idx_inbox_key ON inbox(message_key);
   `,
 ];
 
@@ -424,8 +481,138 @@ function state(user) {
     categories: db.prepare('SELECT * FROM categories ORDER BY sort, id').all(),
     expenses,
     sources: db.prepare('SELECT * FROM sources ORDER BY sort, id').all().map((x) => ({ ...x, split: parseJson(x.split) })),
+    decisions: db.prepare('SELECT * FROM decisions ORDER BY sort, id').all().map((d) => ({ ...d, options: parseJson(d.options) || [] })),
+    scenarios: db.prepare('SELECT * FROM scenarios ORDER BY sort, id').all().map((x) => ({ ...x, choices: parseJson(x.choices) || {} })),
+    documents: db.prepare('SELECT id, title, vendor, filename, mime, size, pages, method, uploaded_by, uploaded_at FROM documents ORDER BY id').all(),
+    inbox: db.prepare("SELECT id, source, mail_from, subject, received_at, filename, mime, size, scan FROM inbox WHERE status = 'neu' ORDER BY id DESC LIMIT 100").all()
+      .map((x) => ({ ...x, scan: parseJson(x.scan) })),
+    mail: mailPublic(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// E-Mail-Postfach (Einstellungen in meta, Passwort nie an den Browser)
+// ---------------------------------------------------------------------------
+function mailConfig() { return parseJson(getMeta('mail_config')) || {}; }
+function mailStatus() { return parseJson(getMeta('mail_status')) || {}; }
+function mailPublic() {
+  const c = mailConfig();
+  return {
+    enabled: !!c.enabled, host: c.host || '', port: c.port || 993, secure: c.secure !== false, user: c.user || '', has_pass: !!c.pass,
+    folder: c.folder || 'INBOX', done_folder: c.done_folder ?? 'Kassensturz', allowed: c.allowed || '', interval: c.interval || 15,
+    status: mailStatus(),
+  };
+}
+let mailRunning = false;
+async function runMail(trigger) {
+  const c = mailConfig();
+  if (!c.host || !c.user || !c.pass) throw new HttpError(400, 'Postfach ist noch nicht vollständig eingerichtet');
+  if (mailRunning) throw new HttpError(409, 'Abruf läuft bereits');
+  mailRunning = true;
+  const st = { last_run: nowIso(), trigger };
+  try {
+    const stat = await mail.fetchInvoices(c, {
+      isKnown: (k) => !!db.prepare('SELECT 1 FROM inbox WHERE message_key = ?').get(k),
+      onAttachment: async (att, msg, key) => {
+        const stored = `${crypto.randomUUID()}${path.extname(att.filename).toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10)}`;
+        fs.writeFileSync(path.join(FILES_DIR, stored), att.data);
+        let scan = null;
+        try {
+          const t = await ocr.extractText(att.data, att.mime);
+          const fields = ocr.parseDocument(t.text);
+          const exps = db.prepare('SELECT id, code, title, hint, vendor, estimate, category_id FROM expenses').all();
+          const matches = ocr.matchPositions(fields, t.text, exps, db.prepare('SELECT id, name FROM categories').all());
+          const best = matches[0] && exps.find((e) => e.id === matches[0].id);
+          scan = { method: t.method, text: t.text.slice(0, 8000), fields, matches, category_id: best ? best.category_id : null };
+        } catch (e) { scan = { error: e.code === 'ENOENT' ? 'Texterkennung nicht installiert' : 'Konnte nicht gelesen werden' }; }
+        db.prepare(`INSERT INTO inbox (source, mail_from, subject, received_at, filename, mime, size, stored_name, scan, message_key)
+                    VALUES ('mail', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(str(msg.forwardedFrom || msg.from, 200), str(msg.subject, 300), nowIso(), str(path.basename(att.filename), 200) || 'anhang',
+            att.mime, att.data.length, stored, JSON.stringify(scan), key);
+      },
+    });
+    Object.assign(st, { ok: true, ...stat });
+    if (stat.attachments) { log(`E-Mail: ${stat.attachments} Beleg(e) aus ${stat.messages} Nachricht(en) übernommen`); bump(); }
+    return stat;
+  } catch (e) {
+    Object.assign(st, { ok: false, error: e.message });
+    log('E-Mail-Abruf fehlgeschlagen:', e.message);
+    throw e instanceof HttpError ? e : new HttpError(502, e.message);
+  } finally {
+    mailRunning = false;
+    setMeta('mail_status', JSON.stringify(st));
+  }
+}
+setInterval(() => {
+  const c = mailConfig();
+  if (!c.enabled || mailRunning) return;
+  const last = Date.parse(mailStatus().last_run || 0) || 0;
+  if (Date.now() - last >= (Number(c.interval) || 15) * 60000) runMail('auto').catch(() => {});
+}, 60 * 1000).unref();
+
+// ---------------------------------------------------------------------------
+// Kalender-Abo (ICS): Fälligkeiten und Gewährleistungsfristen
+// ---------------------------------------------------------------------------
+function addMonthsIso(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1 + n, 1));
+  const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+  t.setUTCDate(Math.min(d, last));
+  return t.toISOString().slice(0, 10);
+}
+function warrantyEnd(e) {
+  const start = e.warranty_start || (e.status === 'bezahlt' ? e.date : '');
+  if (!start || !e.warranty_months) return null;
+  return addMonthsIso(start, e.warranty_months);
+}
+function icsCalendar() {
+  const esc = (t) => String(t || '').replace(/\\/g, '\\\\').replace(/[,;]/g, (c) => '\\' + c).replace(/\r?\n/g, '\\n');
+  const day = (iso) => iso.replace(/-/g, '');
+  const next = (iso) => addMonthsIso(iso, 0) && new Date(Date.parse(iso + 'T00:00:00Z') + 864e5).toISOString().slice(0, 10).replace(/-/g, '');
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const ev = [];
+  const add = (uid, date, summary, desc, alarmDays) => {
+    ev.push(['BEGIN:VEVENT', `UID:${uid}@kassensturz`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${day(date)}`, `DTEND;VALUE=DATE:${next(date)}`,
+      `SUMMARY:${esc(summary)}`, `DESCRIPTION:${esc(desc)}`, 'TRANSP:TRANSPARENT',
+      ...(alarmDays != null ? ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc(summary)}`, `TRIGGER:-P${alarmDays}D`, 'END:VALARM'] : []),
+      'END:VEVENT'].join('\r\n'));
+  };
+  const rows = db.prepare('SELECT * FROM expenses').all();
+  for (const e of rows) {
+    const label = [e.code, e.title].filter(Boolean).join(' ');
+    if (e.status === 'beauftragt' && e.due) add(`due-${e.id}-${e.due}`, e.due, `💶 Fällig: ${label}`, `${e.vendor || ''} ${e.amount != null ? e.amount.toFixed(2).replace('.', ',') + ' €' : ''}`.trim(), 3);
+    const end = warrantyEnd(e);
+    if (end) {
+      add(`gw-${e.id}-${end}`, end, `🛠 Gewährleistung endet: ${label}`, `${e.vendor || ''} ${e.warranty_note || ''}`.trim(), 14);
+      const check = addMonthsIso(end, -3);
+      add(`gwcheck-${e.id}-${check}`, check, `🔍 Begehung vor Gewährleistungsende: ${label}`, 'Mängel jetzt schriftlich anzeigen – Frist endet in 3 Monaten.', 7);
+    }
+  }
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Kassensturz//Hausbau//DE', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    'X-WR-CALNAME:Kassensturz – Fristen', 'X-WR-TIMEZONE:Europe/Berlin', 'REFRESH-INTERVAL;VALUE=DURATION:PT6H', ...ev, 'END:VCALENDAR'].join('\r\n') + '\r\n';
+}
+
+// ---------------------------------------------------------------------------
+// Entscheidungen übernehmen
+// ---------------------------------------------------------------------------
+function cleanOptions(list) {
+  if (!Array.isArray(list)) throw new HttpError(400, 'Optionen fehlen');
+  if (list.length > 12) throw new HttpError(400, 'Höchstens 12 Optionen');
+  return list.map((o, i) => {
+    const effects = (Array.isArray(o.effects) ? o.effects : []).slice(0, 40).map((f) => {
+      const amt = amount(f.amount, true);
+      if (f.type === 'set') {
+        const id = Number(f.expense_id);
+        if (!db.prepare('SELECT 1 FROM expenses WHERE id = ?').get(id)) throw new HttpError(400, 'Position zu einer Option nicht gefunden');
+        return { type: 'set', expense_id: id, amount: amt };
+      }
+      const cat = f.category_id == null || f.category_id === '' ? null : Number(f.category_id);
+      return { type: 'add', label: str(f.label, 120) || 'Zusatzkosten', category_id: cat, amount: amt };
+    });
+    return { id: str(o.id, 20) || `o${i + 1}`, label: str(o.label, 80) || `Option ${i + 1}`, note: str(o.note, 500), effects };
+  });
+}
+
 
 function optAmount(v) {
   if (v === '' || v == null) return null;
@@ -471,15 +658,23 @@ function expenseFromBody(b) {
     estimate: optAmount(b.estimate), amount: optAmount(b.amount),
     vendor: str(b.vendor, 200), date: date(b.date), due: date(b.due),
     hint: str(b.hint, 2000), note: str(b.note, 4000),
+    warranty_start: date(b.warranty_start), warranty_note: str(b.warranty_note, 500),
+    warranty_months: (() => {
+      if (b.warranty_months === '' || b.warranty_months == null) return null;
+      const n = Number(b.warranty_months);
+      if (!Number.isInteger(n) || n < 0 || n > 480) throw new HttpError(400, 'Gewährleistung: Dauer in Monaten (0–480)');
+      return n;
+    })(),
   };
   if (e.estimate == null && e.amount == null) throw new HttpError(400, 'Bitte Schätzung oder Angebot/Ist angeben');
   e.split = splitFromBody(b.split, e.amount != null ? e.amount : e.estimate);
   return e;
 }
 
-const EXPENSE_COLS = ['code', 'title', 'estimate', 'amount', 'status', 'included', 'category_id', 'vendor', 'date', 'due', 'hint', 'note', 'split'];
+const EXPENSE_COLS = ['code', 'title', 'estimate', 'amount', 'status', 'included', 'category_id', 'vendor', 'date', 'due', 'hint', 'note', 'split',
+  'warranty_start', 'warranty_months', 'warranty_note'];
 const expenseValues = (e) => [e.code, e.title, e.estimate, e.amount, e.status, e.included, e.category, e.vendor, e.date, e.due, e.hint, e.note,
-  e.split ? JSON.stringify(e.split) : null];
+  e.split ? JSON.stringify(e.split) : null, e.warranty_start || '', e.warranty_months ?? null, e.warranty_note || ''];
 
 function insertExpense(e, userId) {
   const t = nowIso();
@@ -491,6 +686,21 @@ function insertExpense(e, userId) {
 function updateExpense(id, e, userId) {
   db.prepare(`UPDATE expenses SET ${EXPENSE_COLS.map((c) => c + ' = ?').join(', ')}, updated_by = ?, updated_at = ? WHERE id = ?`)
     .run(...expenseValues(e), userId, nowIso(), id);
+}
+
+function sendFile(res, file, mime, filename) {
+  if (!fs.existsSync(file)) throw new HttpError(404, 'Datei fehlt');
+  const inline = SAFE_INLINE.has(mime);
+  res.writeHead(200, {
+    ...SECURITY_HEADERS,
+    'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; object-src 'self'",
+    'Content-Type': inline ? mime : 'application/octet-stream',
+    'Content-Length': fs.statSync(file).size,
+    'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'Cache-Control': 'private, no-store',
+    'X-Frame-Options': 'SAMEORIGIN',
+  });
+  fs.createReadStream(file).pipe(res);
 }
 
 function removeAttachmentFile(stored) {
@@ -631,6 +841,14 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
 
+  // Kalender-Abo: ohne Anmeldung, aber nur mit geheimem Token (Kalender-Apps können sich nicht anmelden)
+  if (p === '/api/calendar.ics' && m === 'GET') {
+    const tok = getMeta('ics_token');
+    const given = String(url.searchParams.get('token') || '');
+    if (!tok || given.length !== tok.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tok))) throw new HttpError(404, 'Nicht gefunden');
+    return send(res, 200, icsCalendar(), { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': 'inline; filename="kassensturz.ics"' });
+  }
+
   // ---- ab hier nur angemeldet ----
   const user = currentUser(req);
   if (!user) throw new HttpError(401, 'Bitte anmelden');
@@ -692,6 +910,214 @@ async function api(req, res, url) {
       return send(res, 200, { ok: true });
     }
   }
+
+  // ---- Entscheidungen ----
+  if (p === '/api/decisions' && m === 'POST') {
+    const b = await readJson(req);
+    const sort = (db.prepare('SELECT MAX(sort) AS s FROM decisions').get().s || 0) + 10;
+    const opts = cleanOptions(b.options || [{ id: 'o1', label: 'Nein / wie geplant', effects: [] }, { id: 'o2', label: 'Ja', effects: [] }]);
+    const r = db.prepare('INSERT INTO decisions (title, note, options, sort, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(str(b.title, 120) || 'Neue Entscheidung', str(b.note, 1000), JSON.stringify(opts), sort, nowIso());
+    bump();
+    return send(res, 200, { id: Number(r.lastInsertRowid) });
+  }
+  if ((mm = p.match(/^\/api\/decisions\/(\d+)$/))) {
+    const id = idParam(mm[1]);
+    const d = db.prepare('SELECT * FROM decisions WHERE id = ?').get(id);
+    if (!d) throw new HttpError(404, 'Entscheidung nicht gefunden');
+    if (m === 'PUT') {
+      const b = await readJson(req);
+      db.prepare('UPDATE decisions SET title = ?, note = ?, options = ?, decided_option = ? WHERE id = ?').run(
+        b.title !== undefined ? (str(b.title, 120) || d.title) : d.title, b.note !== undefined ? str(b.note, 1000) : d.note,
+        b.options !== undefined ? JSON.stringify(cleanOptions(b.options)) : d.options,
+        b.reopen ? null : d.decided_option, id);
+      bump();
+      return send(res, 200, { ok: true });
+    }
+    if (m === 'DELETE') { db.prepare('DELETE FROM decisions WHERE id = ?').run(id); bump(); return send(res, 200, { ok: true }); }
+  }
+  if ((mm = p.match(/^\/api\/decisions\/(\d+)\/apply$/)) && m === 'POST') {
+    // Option als entschieden übernehmen: Beträge in die Positionen schreiben bzw. neue Positionen anlegen
+    const id = idParam(mm[1]);
+    const d = db.prepare('SELECT * FROM decisions WHERE id = ?').get(id);
+    if (!d) throw new HttpError(404, 'Entscheidung nicht gefunden');
+    const b = await readJson(req);
+    const opt = (parseJson(d.options) || []).find((o) => o.id === b.option_id);
+    if (!opt) throw new HttpError(400, 'Option nicht gefunden');
+    backup('vor-entscheidung');
+    let changed = 0, created = 0;
+    db.exec('BEGIN');
+    try {
+      for (const f of opt.effects) {
+        if (f.type === 'set') {
+          const e = db.prepare('SELECT * FROM expenses WHERE id = ?').get(f.expense_id);
+          if (!e) continue;
+          // Angebot/Ist überschreiben, wenn schon eins da ist – sonst die Schätzung
+          if (e.amount != null) db.prepare('UPDATE expenses SET amount = ?, updated_by = ?, updated_at = ? WHERE id = ?').run(f.amount, user.id, nowIso(), e.id);
+          else db.prepare('UPDATE expenses SET estimate = ?, updated_by = ?, updated_at = ? WHERE id = ?').run(f.amount, user.id, nowIso(), e.id);
+          changed += 1;
+        } else {
+          const cat = f.category_id != null && db.prepare('SELECT 1 FROM categories WHERE id = ?').get(f.category_id) ? f.category_id : null;
+          insertExpense({ code: '', title: f.label, estimate: f.amount, amount: null, status: 'geplant', included: 'nein', category: cat,
+            vendor: '', date: '', due: '', hint: `Aus Entscheidung „${d.title}“: ${opt.label}`, note: '', split: null,
+            warranty_start: '', warranty_months: null, warranty_note: '' }, user.id);
+          created += 1;
+        }
+      }
+      db.prepare('UPDATE decisions SET decided_option = ?, decided_at = ? WHERE id = ?').run(opt.id, nowIso(), id);
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    bump();
+    return send(res, 200, { changed, created });
+  }
+
+  // ---- Szenarien ----
+  if (p === '/api/scenarios' && m === 'POST') {
+    const b = await readJson(req);
+    const sort = (db.prepare('SELECT MAX(sort) AS s FROM scenarios').get().s || 0) + 10;
+    const r = db.prepare('INSERT INTO scenarios (name, choices, sort, created_at) VALUES (?, ?, ?, ?)')
+      .run(str(b.name, 80) || 'Neues Szenario', JSON.stringify(b.choices && typeof b.choices === 'object' ? b.choices : {}), sort, nowIso());
+    bump();
+    return send(res, 200, { id: Number(r.lastInsertRowid) });
+  }
+  if ((mm = p.match(/^\/api\/scenarios\/(\d+)$/))) {
+    const id = idParam(mm[1]);
+    const sc = db.prepare('SELECT * FROM scenarios WHERE id = ?').get(id);
+    if (!sc) throw new HttpError(404, 'Szenario nicht gefunden');
+    if (m === 'PUT') {
+      const b = await readJson(req);
+      const choices = b.choices !== undefined ? Object.fromEntries(Object.entries(b.choices || {}).map(([k, v]) => [String(Number(k)), str(v, 20)])) : parseJson(sc.choices);
+      db.prepare('UPDATE scenarios SET name = ?, choices = ? WHERE id = ?').run(b.name !== undefined ? (str(b.name, 80) || sc.name) : sc.name, JSON.stringify(choices), id);
+      bump();
+      return send(res, 200, { ok: true });
+    }
+    if (m === 'DELETE') { db.prepare('DELETE FROM scenarios WHERE id = ?').run(id); bump(); return send(res, 200, { ok: true }); }
+  }
+
+  // ---- Leistungsbeschreibungen / Angebote ----
+  if (p === '/api/documents' && m === 'POST') {
+    let filename = 'dokument.pdf';
+    try { filename = decodeURIComponent(String(req.headers['x-filename'] || filename)); } catch { /* Standard */ }
+    filename = path.basename(filename).replace(/[\u0000-\u001f"\\]/g, '').slice(0, 200) || 'dokument.pdf';
+    let title = '', vendor = '';
+    try { title = decodeURIComponent(String(req.headers['x-title'] || '')); vendor = decodeURIComponent(String(req.headers['x-vendor'] || '')); } catch { /* leer */ }
+    const mime = str(req.headers['content-type'], 100).split(';')[0] || 'application/pdf';
+    const body = await readBody(req, 60 * 1024 * 1024);
+    if (!body.length) throw new HttpError(400, 'Leere Datei');
+    let t;
+    try { t = await ocr.extractText(body, mime, { maxPages: 120, maxOcrPages: 20 }); }
+    catch (e) {
+      if (e.code === 'ENOENT') throw new HttpError(501, 'Die Texterkennung ist auf diesem Server nicht installiert.');
+      throw new HttpError(422, 'Das Dokument konnte nicht gelesen werden.');
+    }
+    if (t.text.replace(/\s/g, '').length < 200) throw new HttpError(422, 'Im Dokument wurde kaum Text gefunden.');
+    const stored = `${crypto.randomUUID()}${path.extname(filename).toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10)}`;
+    fs.writeFileSync(path.join(FILES_DIR, stored), body);
+    const r = db.prepare(`INSERT INTO documents (title, vendor, filename, mime, size, stored_name, text, pages, method, uploaded_by, uploaded_at)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(str(title, 120) || filename.replace(/\.[^.]+$/, ''), str(vendor, 120), filename, mime, body.length, stored, t.text,
+        t.text.split('\f').length, t.method, user.id, nowIso());
+    log(`Dokument geprüft: ${filename} (${t.method}) von ${user.username}`);
+    bump();
+    return send(res, 200, { id: Number(r.lastInsertRowid) });
+  }
+  if (p === '/api/documents/analysis' && m === 'GET') {
+    const exps = db.prepare('SELECT id, code, title, hint FROM expenses').all();
+    const out = db.prepare('SELECT id, text FROM documents ORDER BY id').all().map((d) => {
+      const a = docs.analyze(d.text, exps);
+      return { id: d.id, byExpense: a.byExpense, traps: a.traps };
+    });
+    return send(res, 200, { documents: out });
+  }
+  if ((mm = p.match(/^\/api\/documents\/(\d+)(\/file)?$/))) {
+    const id = idParam(mm[1]);
+    const d = db.prepare('SELECT * FROM documents WHERE id = ?').get(id);
+    if (!d) throw new HttpError(404, 'Dokument nicht gefunden');
+    if (mm[2] && m === 'GET') return sendFile(res, path.join(FILES_DIR, path.basename(d.stored_name)), d.mime, d.filename);
+    if (!mm[2] && m === 'PUT') {
+      const b = await readJson(req);
+      db.prepare('UPDATE documents SET title = ?, vendor = ? WHERE id = ?').run(str(b.title, 120) || d.title, str(b.vendor, 120), id);
+      bump(); return send(res, 200, { ok: true });
+    }
+    if (!mm[2] && m === 'DELETE') {
+      db.prepare('DELETE FROM documents WHERE id = ?').run(id);
+      removeAttachmentFile(d.stored_name);
+      bump(); return send(res, 200, { ok: true });
+    }
+  }
+  if (p === '/api/documents/apply' && m === 'POST') {
+    const b = await readJson(req);
+    const ch = Array.isArray(b.changes) ? b.changes.slice(0, 2000) : [];
+    db.exec('BEGIN');
+    let n = 0;
+    try {
+      for (const c of ch) {
+        if (!INCLUDED.includes(c.included)) continue;
+        n += Number(db.prepare('UPDATE expenses SET included = ?, updated_by = ?, updated_at = ? WHERE id = ?').run(c.included, user.id, nowIso(), Number(c.expense_id)).changes);
+      }
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    bump();
+    return send(res, 200, { changed: n });
+  }
+
+  // ---- Eingang (Belege aus dem E-Mail-Postfach) ----
+  if ((mm = p.match(/^\/api\/inbox\/(\d+)(?:\/(file|attach|dismiss))?$/))) {
+    const id = idParam(mm[1]);
+    const it = db.prepare('SELECT * FROM inbox WHERE id = ?').get(id);
+    if (!it) throw new HttpError(404, 'Eintrag nicht gefunden');
+    if (mm[2] === 'file' && m === 'GET') return sendFile(res, path.join(FILES_DIR, path.basename(it.stored_name)), it.mime, it.filename);
+    if (mm[2] === 'attach' && m === 'POST') {
+      const b = await readJson(req);
+      const eid = Number(b.expense_id);
+      if (!db.prepare('SELECT 1 FROM expenses WHERE id = ?').get(eid)) throw new HttpError(404, 'Position nicht gefunden');
+      db.prepare(`INSERT INTO attachments (expense_id, filename, mime, size, stored_name, uploaded_by, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(eid, it.filename, it.mime, it.size, it.stored_name, user.id, nowIso());
+      db.prepare("UPDATE inbox SET status = 'erledigt', expense_id = ? WHERE id = ?").run(eid, id);
+      bump(); return send(res, 200, { ok: true });
+    }
+    if (mm[2] === 'dismiss' && m === 'POST') {
+      db.prepare("UPDATE inbox SET status = 'verworfen' WHERE id = ?").run(id);
+      if (!db.prepare('SELECT 1 FROM attachments WHERE stored_name = ?').get(it.stored_name)) removeAttachmentFile(it.stored_name);
+      bump(); return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- E-Mail-Postfach ----
+  if (p === '/api/mail' && m === 'PUT') {
+    const b = await readJson(req);
+    const c = mailConfig();
+    const port = Number(b.port) || 993;
+    if (port < 1 || port > 65535) throw new HttpError(400, 'Ungültiger Port');
+    Object.assign(c, {
+      enabled: !!b.enabled, host: str(b.host, 200), port, secure: b.secure !== false, user: str(b.user, 200),
+      folder: str(b.folder, 120) || 'INBOX', done_folder: str(b.done_folder, 120), allowed: str(b.allowed, 1000),
+      interval: Math.min(1440, Math.max(5, Number(b.interval) || 15)),
+    });
+    if (typeof b.pass === 'string' && b.pass) c.pass = b.pass.slice(0, 300);
+    if (b.clear_pass) delete c.pass;
+    setMeta('mail_config', JSON.stringify(c));
+    bump();
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/mail/test' && m === 'POST') {
+    const c = mailConfig();
+    if (!c.host || !c.user || !c.pass) throw new HttpError(400, 'Bitte Server, Benutzer und Passwort speichern');
+    try { return send(res, 200, await mail.testConnection(c)); }
+    catch (e) { throw new HttpError(502, e.message); }
+  }
+  if (p === '/api/mail/run' && m === 'POST') {
+    const stat = await runMail('manuell');
+    return send(res, 200, stat);
+  }
+
+  // ---- Kalender-Abo ----
+  if (p === '/api/calendar/token' && m === 'POST') {
+    const t = crypto.randomBytes(24).toString('base64url');
+    setMeta('ics_token', t);
+    return send(res, 200, { token: t });
+  }
+  if (p === '/api/calendar/token' && m === 'GET') return send(res, 200, { token: getMeta('ics_token') || null });
 
   // Beleg lesen (OCR) – die Datei wird nur ausgewertet und nicht gespeichert
   if (p === '/api/scan' && m === 'POST') {

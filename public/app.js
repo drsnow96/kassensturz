@@ -18,7 +18,9 @@
   ];
   const IL = Object.fromEntries(INCL.map((s) => [s.k, s.l]));
   const NOCAT = 'none';
-  const TABS = ['uebersicht', 'kosten', 'budget', 'finanzierung', 'einstellungen'];
+  const TABS = ['uebersicht', 'kosten', 'budget', 'finanzierung', 'planung', 'einstellungen'];
+  const PLAN_TABS = ['szenarien', 'leistungsbeschreibung', 'gewaehrleistung'];
+  let planTab = 'szenarien';
 
   let S = { categories: [], expenses: [], sources: [], users: [], me: null, rev: 0, version: '', settings: { reserve_rate: 0.1, default_split: null } };
   let tab = 'uebersicht';
@@ -333,10 +335,12 @@
     }
     pendingRender = false;
     document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
+    const nIn = (S.inbox || []).length; const kb = document.querySelector('#tabs a[data-tab=kosten] span'); if (kb) kb.innerHTML = 'Kosten' + (nIn ? ` <b class="badge">${nIn}</b>` : '');
     const v = $('#view');
     if (tab === 'kosten') v.innerHTML = mobile ? viewCostsMobile() : viewCosts();
     else if (tab === 'budget') v.innerHTML = mobile ? viewBudgetMobile() : viewBudget();
     else if (tab === 'finanzierung') v.innerHTML = viewFinance();
+    else if (tab === 'planung') v.innerHTML = viewPlanning();
     else if (tab === 'einstellungen') { v.innerHTML = viewSettings(); loadBackups(); }
     else v.innerHTML = viewOverview();
     if (keep) {
@@ -386,6 +390,7 @@
     });
     html += `<div class="catrow"><div class="n muted">Reserve (${rr()})</div><div></div><div class="a">${fmt0.format(t.reserve)}</div></div>`;
     html += `</div><div class="grid" style="gap:14px">`;
+    html += deadlinesCard();
 
     // Wer hat gezahlt
     if (S.users.length) {
@@ -465,6 +470,7 @@
       ${ocrOn() ? '<button id="scanDoc" title="PDF oder Foto einer Rechnung bzw. eines Angebots – oder Datei hierher ziehen">📄 Beleg erfassen</button>' : ''}
       <button class="primary" id="addExp">+ Position</button>
     </div>`;
+    html += inboxCard();
     const groups = S.categories.map((c) => ({ id: c.id, name: c.name, items: S.expenses.filter((e) => e.category_id === c.id) }));
     const orphan = S.expenses.filter((e) => !catOf(e.category_id));
     if (orphan.length) groups.push({ id: NOCAT, name: 'Ohne Kategorie', items: orphan });
@@ -555,7 +561,7 @@
   }
 
   function viewCostsMobile() {
-    let html = filterBar();
+    let html = inboxCard() + filterBar();
     const groups = S.categories.map((c) => ({ id: c.id, name: c.name, items: S.expenses.filter((e) => e.category_id === c.id) }));
     const orphan = S.expenses.filter((e) => !catOf(e.category_id));
     if (orphan.length) groups.push({ id: NOCAT, name: 'Ohne Kategorie', items: orphan });
@@ -944,6 +950,7 @@
         </form>
         <div class="err" id="setErr"></div><div class="okmsg" id="setOk"></div>
       </div>
+      ${mailCard()}
       <div class="card"><h2>Mein Konto</h2>
         <form id="meForm">
           <label>Anzeigename<input name="display_name" value="${esc(S.me ? S.me.display_name : '')}" required></label>
@@ -987,6 +994,30 @@
       </div>
     </div>`;
   }
+  function mailCard() {
+    const m = S.mail || {}; const st = m.status || {};
+    return `<div class="card"><h2>E-Mail-Postfach für Rechnungen</h2>
+      <div class="muted small">Rechnungen einfach an ein eigenes Postfach weiterleiten – Kassensturz holt PDF- und Bild-Anhänge regelmäßig ab, liest sie und legt sie in den Eingang unter „Kosten“. Am besten ein eigenes Postfach oder einen eigenen Ordner nutzen; die Mails werden danach in den Erledigt-Ordner verschoben.</div>
+      <form id="mailForm" style="margin-top:10px">
+        <label class="mrow small"><input type="checkbox" name="enabled" ${m.enabled ? 'checked' : ''}> Automatisch abrufen</label>
+        <div class="splitbox">
+          <label>IMAP-Server<input name="host" value="${esc(m.host || '')}" placeholder="z. B. imap.gmx.net"></label>
+          <label>Port / Verschlüsselung<select name="secure"><option value="tls" ${m.secure !== false ? 'selected' : ''}>993 · SSL/TLS</option><option value="plain" ${m.secure === false ? 'selected' : ''}>143 · unverschlüsselt (nur lokal)</option></select></label>
+          <label>Benutzer<input name="user" value="${esc(m.user || '')}" autocomplete="off" placeholder="rechnungen@…"></label>
+          <label>Passwort<input name="pass" type="password" autocomplete="new-password" placeholder="${m.has_pass ? 'gespeichert – leer lassen' : 'App-Passwort'}"></label>
+          <label>Ordner<input name="folder" value="${esc(m.folder || 'INBOX')}"></label>
+          <label>Erledigt-Ordner<input name="done_folder" value="${esc(m.done_folder ?? 'Kassensturz')}" placeholder="leer = nur als gelesen markieren"></label>
+          <label class="full">Nur von diesen Absendern (empfohlen)<input name="allowed" value="${esc(m.allowed || '')}" placeholder="du@…, partnerin@…, @firma.de"></label>
+          <label>Abruf alle (Minuten)<input name="interval" type="number" min="5" max="1440" value="${m.interval || 15}"></label>
+          <input type="hidden" name="port" value="${m.port || 993}">
+        </div>
+        <div class="mrow" style="flex-wrap:wrap;margin-top:6px"><button type="submit" class="primary">Speichern</button><button type="button" id="mailTest">Verbindung testen</button><button type="button" id="mailRun">Jetzt abrufen</button></div>
+      </form>
+      <div id="mailOut" class="small muted" style="margin-top:8px">${st.last_run ? `Letzter Abruf ${new Date(st.last_run).toLocaleString('de-DE')}: ${st.ok ? `ok, ${st.attachments || 0} Beleg(e)` : `<span class="neg">${esc(st.error || 'Fehler')}</span>`}` : 'Noch nicht abgerufen.'}</div>
+      <div class="muted small" style="margin-top:8px">Gmail: IMAP aktivieren und ein App-Passwort nutzen. GMX/Web.de: IMAP in den Einstellungen freischalten. Outlook/Hotmail erlauben keine Passwort-Anmeldung per IMAP mehr. Das Passwort liegt nur im Datenordner auf der NAS.</div>
+    </div>`;
+  }
+
   async function loadBackups() {
     const el = $('#backupList'); if (!el) return;
     try {
@@ -1008,9 +1039,10 @@
     if (id && !e) return;
     const d = { ...(e || { status: 'geplant', included: 'nein', date: '', category_id: filt.cat && filt.cat !== NOCAT ? Number(filt.cat) : null, attachments: [], split: null }) };
     const auto = new Set();
+    if (scan && scan.prefill) { Object.assign(d, scan.prefill); scan = null; }
     if (scan) {
       // Erkannte Werte übernehmen – bei einer bestehenden Position bleiben Nr, Kostenpunkt, Bereich und Schätzung erhalten
-      const f = scan.result.fields;
+      const f = scan.result.fields || {};
       const put = (k, v) => { if (v !== null && v !== undefined && v !== '') { d[k] = v; auto.add(k); } };
       if (!e) { put('title', f.title); put('category_id', scan.result.category_id); }
       put('amount', f.amount); put('status', f.status); put('date', f.date); put('due', f.due);
@@ -1019,11 +1051,12 @@
     }
     const custom = !!d.split;
     const scanBox = scan ? (() => {
-      const r = scan.result; const f = r.fields;
+      const r = scan.result; const f = r.fields || {}; r.matches = r.matches || [];
       const how = { 'pdf-text': 'Text aus dem PDF', 'pdf-ocr': 'Texterkennung (Scan)', 'image-ocr': 'Texterkennung (Foto)' }[r.method] || '';
       const typ = { rechnung: 'Rechnung', angebot: 'Angebot', auftrag: 'Auftragsbestätigung', quittung: 'Kassenbon' }[f.type] || 'Dokumentart nicht erkannt';
       return `<div class="scanbox">
-        <div><b>${esc(scan.file.name)}</b> gelesen – ${typ}${how ? ` · ${how}` : ''}</div>
+        <div><b>${esc(scan.file.name)}</b> gelesen – ${typ}${how ? ` · ${how}` : ''}${scan.inboxId ? ` · <a href="/api/inbox/${scan.inboxId}/file" target="_blank" rel="noopener">ansehen</a>` : ''}</div>
+        ${scan.inboxId ? `<div class="small muted">aus E-Mail von ${esc(scan.from || '')}${scan.subject ? ' · „' + esc(scan.subject) + '“' : ''}</div>` : ''}
         <div class="small muted"><span class="lg auto">erkannt</span> <span class="lg missing">bitte prüfen / ergänzen</span>${f.amount_confidence === 'niedrig' ? ' · <span class="neg">Betrag unsicher – bitte prüfen</span>' : ''}</div>
         <div class="scanmatch"><span class="small muted">Zuordnen zu:</span>
           <label><input type="radio" name="scanTarget" value="" ${e ? '' : 'checked'}> Neue Position</label>
@@ -1048,6 +1081,15 @@
         <label>Fällig am<input type="date" name="due" value="${esc(d.due || '')}"></label>
         <label class="full">Hinweis<textarea name="hint" rows="2">${esc(d.hint || '')}</textarea></label>
         <label class="full">Info / Notiz (Links werden klickbar)<textarea name="note" rows="2">${esc(d.note || '')}</textarea></label>
+        <details class="full wbox" ${d.warranty_months ? 'open' : ''}><summary class="small muted" style="font-weight:500">Gewährleistung${d.warranty_months ? ` · ${durLabel(d.warranty_months)}` : ''}</summary>
+          <div class="form" style="margin-top:8px">
+            <label>Abnahme / Beginn<input type="date" name="warranty_start" value="${esc(d.warranty_start || '')}"></label>
+            <label>Dauer<select name="warranty_preset"><option value="">keine</option>${WARRANTY.map((p) => `<option value="${p.m}" ${d.warranty_months === p.m ? 'selected' : ''}>${esc(p.l)}</option>`).join('')}
+              <option value="custom" ${d.warranty_months && !WARRANTY.some((p) => p.m === d.warranty_months) ? 'selected' : ''}>eigene Dauer …</option></select></label>
+            <label class="wcustom" ${d.warranty_months && !WARRANTY.some((p) => p.m === d.warranty_months) ? '' : 'hidden'}>Monate<input name="warranty_custom" inputmode="numeric" value="${d.warranty_months && !WARRANTY.some((p) => p.m === d.warranty_months) ? d.warranty_months : ''}"></label>
+            <label class="full">Notiz zur Gewährleistung<input name="warranty_note" value="${esc(d.warranty_note || '')}" placeholder="z. B. Abnahmeprotokoll vom …, Herstellergarantie 10 Jahre"></label>
+            <div class="full small muted" id="wInfo"></div>
+          </div></details>
         ${S.users.length > 1 ? `<div class="full">
           <div class="small muted" style="font-weight:500;margin-bottom:4px">Aufteilung der Zahlung</div>
           <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="splitDefault" ${custom ? '' : 'checked'} style="width:auto"> Standardaufteilung verwenden (${splitLabel(defaultSplit())})</label>
@@ -1056,7 +1098,7 @@
         <div class="full">
           <div class="small muted" style="font-weight:500;margin-bottom:4px">Belege (PDF, Fotos)</div>
           <div id="attList">${(d.attachments || []).map((a) => `<div class="att"><a href="/api/attachments/${a.id}" target="_blank" rel="noopener">${esc(a.filename)}</a><span class="muted small">${fsize(a.size)}</span><button type="button" class="iconbtn" data-delatt="${a.id}">✕</button></div>`).join('')}</div>
-          ${scan ? `<div class="att"><span>📄 ${esc(scan.file.name)}</span><span class="muted small">${fsize(scan.file.size)} · wird beim Speichern angehängt</span></div>` : ''}
+          ${scan ? `<div class="att"><span>📄 ${esc(scan.file.name)}</span><span class="muted small">${fsize(scan.file.size || 0)} · wird beim Speichern angehängt</span></div>` : ''}
           <input type="file" name="files" multiple accept="application/pdf,image/*" style="margin-top:6px">
         </div>
       </form>
@@ -1084,6 +1126,17 @@
       }));
     }
     if ($('#splitDefault')) $('#splitDefault').onchange = (ev) => { $('#splitCustom').hidden = ev.target.checked; };
+    // Gewährleistung: Ende live anzeigen
+    const wMonths = () => { const p = form.warranty_preset.value; return p === 'custom' ? Number(form.warranty_custom.value) || 0 : Number(p) || 0; };
+    const wRefresh = () => {
+      form.querySelector('.wcustom').hidden = form.warranty_preset.value !== 'custom';
+      const m2 = wMonths(); const st = form.warranty_start.value || (form.status.value === 'bezahlt' ? form.date.value : '');
+      $('#wInfo').textContent = m2 && st ? `Endet am ${fdate(addMonthsIso(st, m2))} · Begehung bis ${fdate(addMonthsIso(addMonthsIso(st, m2), -3))}${form.warranty_start.value ? '' : ' (Beginn = Rechnungsdatum, bitte Abnahme eintragen)'}`
+        : m2 ? 'Bitte Abnahme-Datum eintragen (oder Status „Bezahlt“ mit Datum).' : '';
+    };
+    ['warranty_preset', 'warranty_custom', 'warranty_start', 'status', 'date'].forEach((n) => form.elements[n].addEventListener('input', wRefresh));
+    form.warranty_preset.addEventListener('change', wRefresh);
+    wRefresh();
     // Gesamtbetrag für die €-Aufteilung folgt Angebot/Ist bzw. Schätzung
     form.addEventListener('input', (ev) => {
       if (ev.target.name !== 'amount' && ev.target.name !== 'estimate') return;
@@ -1125,9 +1178,10 @@
         code: f.get('code'), title, estimate, amount, status: f.get('status'), included: f.get('included'),
         category_id: f.get('category_id') ? Number(f.get('category_id')) : null,
         vendor: f.get('vendor'), date: f.get('date'), due: f.get('due'), hint: f.get('hint'), note: f.get('note'), split,
+        warranty_start: f.get('warranty_start'), warranty_note: f.get('warranty_note'), warranty_months: wMonths() || null,
       };
       const files = [...form.querySelector('input[type=file]').files];
-      if (scan) files.unshift(scan.file);
+      if (scan && scan.file instanceof Blob) files.unshift(scan.file);
       $('#saveExp').disabled = true;
       try {
         let expId = e && e.id;
@@ -1139,6 +1193,7 @@
             'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name),
           });
         }
+        if (scan && scan.inboxId) await api('POST', `/api/inbox/${scan.inboxId}/attach`, { expense_id: expId });
         closeModal();
         await load();
       } catch (err) {
@@ -1146,6 +1201,452 @@
         await load();
       }
     }
+  }
+
+  // =====================================================================
+  // Planung: Szenarien · Leistungsbeschreibung · Gewährleistung
+  // =====================================================================
+  function viewPlanning() {
+    const seg = [['szenarien', 'Was-wäre-wenn', 'Szenarien'], ['leistungsbeschreibung', 'Leistungsbeschreibung', 'Leistungen'], ['gewaehrleistung', 'Gewährleistung', 'Gewährl.']];
+    let html = `<div class="seg planseg">${seg.map(([k, l, ml]) => `<a href="#${k}" class="${planTab === k ? 'on' : ''}">${mobile ? ml : l}</a>`).join('')}</div>`;
+    if (planTab === 'leistungsbeschreibung') html += viewDocuments();
+    else if (planTab === 'gewaehrleistung') html += viewWarranty();
+    else html += viewScenarios();
+    return html;
+  }
+
+  // ---------- Was-wäre-wenn ----------
+  /** Positionen mit den Kostenänderungen einer Auswahl von Optionen */
+  function withEffects(effects) {
+    const sets = new Map(); const adds = [];
+    effects.forEach((f) => { if (f.type === 'set') sets.set(f.expense_id, num(f.amount)); else adds.push(f); });
+    const list = S.expenses.map((e) => (sets.has(e.id)
+      ? { ...e, amount: sets.get(e.id), included: 'nein', status: e.status === 'option' ? 'geplant' : e.status }
+      : e));
+    adds.forEach((f, i) => list.push({ id: -1 - i, title: f.label, included: 'nein', status: 'geplant', estimate: num(f.amount), amount: null, category_id: f.category_id ?? null, attachments: [] }));
+    return list;
+  }
+  const openDecisions = () => (S.decisions || []).filter((d) => !d.decided_option);
+  function effectsFor(choices) {
+    const out = [];
+    openDecisions().forEach((d) => {
+      const oid = choices[d.id];
+      const o = d.options.find((x) => x.id === oid);
+      if (o) out.push(...o.effects);
+    });
+    return out;
+  }
+  function loanFactor() {
+    // Rate je geliehenem Euro aus dem ersten Darlehen mit Rate (Annuität)
+    const l = loans().find((x) => num(x.amount) > 0 && num(x.rate) > 0);
+    return l ? { f: num(l.rate) / num(l.amount), name: l.name } : null;
+  }
+  function scenarioResult(choices) {
+    const t = totals(withEffects(effectsFor(choices)));
+    return { ...t, puffer: finTotal() - t.gesamt };
+  }
+  function effectLabel(f) {
+    if (f.type === 'set') { const e = S.expenses.find((x) => x.id === f.expense_id); return `${e ? (e.code ? e.code + ' ' : '') + e.title : 'Position'} → ${fmt0.format(num(f.amount))}`; }
+    return `${num(f.amount) < 0 ? 'Einsparung' : '+'} ${f.label}: ${fmt0.format(num(f.amount))}`;
+  }
+
+  function viewScenarios() {
+    const base = scenarioResult({});
+    const lf = loanFactor();
+    const decs = S.decisions || [];
+    let html = `<div class="toolbar"><div class="muted">Offene Entscheidungen mit ihren Optionen anlegen und in Szenarien kombinieren. Nichts davon ändert eure Kosten, bis ihr eine Option übernehmt.</div>
+      <span class="spacer"></span><button class="primary" id="addDecision">+ Entscheidung</button></div>`;
+    if (!decs.length) html += `<div class="card"><div class="empty">Noch keine Entscheidungen. Beispiele: „FingerHaus oder Büdenbender“, „Holzfaserdämmung“, „KNX komplett oder nur Vorbereitung“, „Klima-Splitgeräte“.</div></div>`;
+    html += `<div class="decgrid">${decs.map((d) => {
+      const decided = d.options.find((o) => o.id === d.decided_option);
+      return `<div class="card dec ${decided ? 'done' : ''}">
+        <div class="mrow" style="align-items:baseline"><h2 style="flex:1;margin:0">${esc(d.title)}</h2>${decided ? `<span class="chip s-bezahlt">entschieden</span>` : ''}</div>
+        ${d.note ? `<div class="muted small" style="margin-top:4px">${esc(d.note)}</div>` : ''}
+        <div class="opts">${d.options.map((o) => {
+          const r = decided ? null : scenarioResult({ [d.id]: o.id });
+          const delta = r ? r.gesamt - base.gesamt : 0;
+          return `<div class="opt ${decided && decided.id === o.id ? 'chosen' : ''}">
+            <div class="mrow"><b style="flex:1">${esc(o.label)}</b>${r ? `<span class="strong ${delta > 0.5 ? 'neg' : delta < -0.5 ? 'pos' : 'muted'}">${Math.abs(delta) < 0.5 ? '±0 €' : (delta > 0 ? '+' : '−') + fmt0.format(Math.abs(delta))}</span>` : ''}</div>
+            ${o.note ? `<div class="muted small">${esc(o.note)}</div>` : ''}
+            ${o.effects.length ? `<ul class="eff">${o.effects.map((f) => `<li>${esc(effectLabel(f))}</li>`).join('')}</ul>` : '<div class="muted small">keine Kostenänderung</div>'}
+            ${r && lf && Math.abs(delta) >= 1 ? `<div class="muted small">≈ ${delta > 0 ? '+' : '−'}${fmt0.format(Math.abs(delta * lf.f))} Rate / Monat</div>` : ''}
+            ${!decided && o.effects.length ? `<button class="iconbtn" data-applyopt="${d.id}:${o.id}">Übernehmen</button>` : ''}
+          </div>`;
+        }).join('')}</div>
+        <div class="mrow" style="justify-content:flex-end;margin-top:8px">${decided ? `<button class="iconbtn" data-reopendec="${d.id}">Wieder öffnen</button>` : ''}<button class="iconbtn" data-editdec="${d.id}">Bearbeiten</button></div>
+      </div>`;
+    }).join('')}</div>`;
+
+    // Szenarien vergleichen
+    const scs = S.scenarios || [];
+    html += `<div class="toolbar" style="margin-top:18px"><h2 style="margin:0">Szenarien vergleichen</h2><span class="spacer"></span>
+      ${openDecisions().length ? '<button class="primary" id="addScenario">+ Szenario</button>' : ''}</div>`;
+    if (!openDecisions().length) html += `<div class="card"><div class="muted small">Sobald es offene Entscheidungen gibt, kannst du hier Kombinationen vergleichen.</div></div>`;
+    else {
+      const cols = [{ name: 'Ist-Stand', choices: {}, base: true }, ...scs];
+      const res = cols.map((c) => ({ c, r: scenarioResult(c.choices || {}) }));
+      const line = (r) => { const d = r.gesamt - base.gesamt; return Math.abs(d) < 0.5 ? '±0 €' : (d > 0 ? '+' : '−') + fmt0.format(Math.abs(d)); };
+      const picks = (c) => openDecisions().map((d) => { const o = d.options.find((x) => x.id === (c.choices || {})[d.id]); return o ? `<div class="small"><span class="muted">${esc(d.title)}:</span> ${esc(o.label)}</div>` : ''; }).join('') || '<div class="muted small">wie geplant</div>';
+      if (mobile) {
+        html += res.map(({ c, r }) => `<div class="mcard">
+          <div class="top"><span class="ttl">${esc(c.name)}</span>${c.base ? '' : `<button class="iconbtn" data-editsc="${c.id}">Bearbeiten</button>`}</div>
+          ${c.base ? '' : picks(c)}
+          <div class="mstats"><div><small>Gesamtbudget</small><b>${fmt0.format(r.gesamt)}</b></div><div><small>ggü. Ist</small>${line(r)}</div>
+            <div><small>Worst Case</small>${fmt0.format(r.worst)}</div><div><small>${r.puffer < 0 ? 'Lücke' : 'Puffer'}</small><span class="${r.puffer < 0 ? 'neg' : 'pos'}">${fmt0.format(Math.abs(r.puffer))}</span></div>
+            ${lf ? `<div><small>Rate / Monat</small>${(r.gesamt - base.gesamt) >= 0 ? '+' : '−'}${fmt0.format(Math.abs((r.gesamt - base.gesamt) * lf.f))}</div>` : ''}</div></div>`).join('');
+      } else {
+        html += `<div class="card" style="padding:4px 8px;overflow-x:auto"><table class="sctable"><thead><tr><th></th>${res.map(({ c }) => `<th class="num">${esc(c.name)}${c.base ? '' : ` <button class="iconbtn" data-editsc="${c.id}">✎</button>`}</th>`).join('')}</tr></thead><tbody>
+          <tr><td class="muted">Auswahl</td>${res.map(({ c }) => `<td class="num">${c.base ? '<span class="muted small">aktueller Stand</span>' : picks(c)}</td>`).join('')}</tr>
+          <tr><td>Gesamtbudget</td>${res.map(({ r }) => `<td class="num"><b>${fmt0.format(r.gesamt)}</b></td>`).join('')}</tr>
+          <tr><td>ggü. Ist-Stand</td>${res.map(({ r }) => { const d = r.gesamt - base.gesamt; return `<td class="num ${d > 0.5 ? 'neg' : d < -0.5 ? 'pos' : 'muted'}">${line(r)}</td>`; }).join('')}</tr>
+          <tr><td>Worst Case</td>${res.map(({ r }) => `<td class="num">${fmt0.format(r.worst)}</td>`).join('')}</tr>
+          <tr><td>Finanzierung: Puffer / Lücke</td>${res.map(({ r }) => `<td class="num ${r.puffer < 0 ? 'neg' : 'pos'}">${r.puffer < 0 ? 'Lücke ' : ''}${fmt0.format(Math.abs(r.puffer))}</td>`).join('')}</tr>
+          ${lf ? `<tr><td>Rate / Monat (zusätzlich)</td>${res.map(({ r }) => { const d = (r.gesamt - base.gesamt) * lf.f; return `<td class="num">${Math.abs(d) < 1 ? '–' : (d > 0 ? '+' : '−') + fmt0.format(Math.abs(d))}</td>`; }).join('')}</tr>` : ''}
+        </tbody></table></div>`;
+      }
+      html += `<div class="muted small" style="margin-top:6px">${lf ? `Ratenänderung geschätzt mit dem Verhältnis Rate/Darlehen von „${esc(lf.name)}“ (Mehrkosten werden zu denselben Bedingungen finanziert).` : 'Für eine Schätzung der Ratenänderung unter Finanzierung ein Darlehen mit Betrag und Rate anlegen.'}</div>`;
+    }
+    return html;
+  }
+
+  function decisionDialog(id) {
+    const src = id ? (S.decisions || []).find((d) => d.id === id) : null;
+    const dd = src ? JSON.parse(JSON.stringify(src)) : { title: '', note: '', options: [{ id: 'o1', label: 'Nein / wie geplant', note: '', effects: [] }, { id: 'o2', label: 'Ja', note: '', effects: [] }] };
+    const posOpts = (sel) => `<option value="">– Position wählen –</option>${S.categories.map((c) => `<optgroup label="${esc(c.name)}">${S.expenses.filter((e) => e.category_id === c.id).sort(byCode).map((e) => `<option value="${e.id}" ${sel === e.id ? 'selected' : ''}>${esc((e.code ? e.code + ' ' : '') + e.title)}</option>`).join('')}</optgroup>`).join('')}`;
+    const catOpts = (sel) => `<option value="">Ohne Kategorie</option>${S.categories.map((c) => `<option value="${c.id}" ${sel === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}`;
+    const read = () => {
+      dd.title = $('#decTitle').value.trim(); dd.note = $('#decNote').value.trim();
+      dd.options.forEach((o, oi) => {
+        o.label = document.querySelector(`[data-o="${oi}"][data-k=label]`).value.trim();
+        o.note = document.querySelector(`[data-o="${oi}"][data-k=note]`).value.trim();
+        o.effects.forEach((f, fi) => {
+          const g = (k) => document.querySelector(`[data-o="${oi}"][data-f="${fi}"][data-k="${k}"]`);
+          f.type = g('type').value;
+          f.amount = parseAmount(g('amount').value);
+          if (g('expense')) f.expense_id = Number(g('expense').value) || null;
+          if (g('label')) f.label = g('label').value.trim();
+          if (g('cat')) f.category_id = g('cat').value ? Number(g('cat').value) : null;
+        });
+      });
+    };
+    const draw = () => {
+      $('#decOpts').innerHTML = dd.options.map((o, oi) => `<div class="optedit">
+        <div class="mrow"><input data-o="${oi}" data-k="label" value="${esc(o.label)}" placeholder="Option, z. B. „Ja, mit Holzfaser“" style="flex:1;font-weight:600">
+          ${dd.options.length > 1 ? `<button type="button" class="iconbtn" data-delopt="${oi}" title="Option entfernen">✕</button>` : ''}</div>
+        <input data-o="${oi}" data-k="note" value="${esc(o.note || '')}" placeholder="Notiz (optional)" style="width:100%;margin-top:6px">
+        ${o.effects.map((f, fi) => `<div class="effrow">
+          <select data-o="${oi}" data-f="${fi}" data-k="type"><option value="set" ${f.type === 'set' ? 'selected' : ''}>Position kostet</option><option value="add" ${f.type !== 'set' ? 'selected' : ''}>Zusätzliche Kosten</option></select>
+          ${f.type === 'set' ? `<select data-o="${oi}" data-f="${fi}" data-k="expense" class="grow">${posOpts(f.expense_id)}</select>`
+            : `<input data-o="${oi}" data-f="${fi}" data-k="label" value="${esc(f.label || '')}" placeholder="Bezeichnung" class="grow"><select data-o="${oi}" data-f="${fi}" data-k="cat">${catOpts(f.category_id)}</select>`}
+          <input data-o="${oi}" data-f="${fi}" data-k="amount" inputmode="decimal" value="${esc(Number.isFinite(f.amount) ? amtInput(f.amount) : '')}" placeholder="€ (negativ = Einsparung)" class="amt">
+          <button type="button" class="iconbtn" data-deleff="${oi}:${fi}">✕</button></div>`).join('')}
+        <button type="button" class="iconbtn linkbtn" data-addeff="${oi}">+ Kostenänderung</button>
+      </div>`).join('');
+    };
+    openModal(`<h2>${src ? 'Entscheidung bearbeiten' : 'Neue Entscheidung'}</h2>
+      <div class="form">
+        <label class="full">Frage *<input id="decTitle" value="${esc(dd.title)}" placeholder="z. B. Holzfaserdämmung bei FingerHaus?"></label>
+        <label class="full">Notiz<input id="decNote" value="${esc(dd.note || '')}" placeholder="Worauf es ankommt, bis wann entschieden werden muss …"></label>
+      </div>
+      <div class="small muted" style="margin:12px 0 6px">Optionen: je Option, welche Position wie viel kostet oder welche Kosten dazukommen.</div>
+      <div id="decOpts"></div>
+      <button type="button" class="iconbtn" id="addOpt" style="margin-top:6px">+ Option</button>
+      <div class="err" id="decErr"></div>
+      <div class="actions">${src ? '<button class="danger" id="delDec">Löschen</button>' : ''}<span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="saveDec">Speichern</button></div>`);
+    draw();
+    $('#cancel').onclick = closeModal;
+    $('#dlg').addEventListener('click', (ev) => {
+      const t = ev.target;
+      if (t.id === 'addOpt') { read(); dd.options.push({ id: 'o' + (Math.max(0, ...dd.options.map((o) => Number(String(o.id).replace(/\D/g, '')) || 0)) + 1), label: '', note: '', effects: [] }); draw(); }
+      else if (t.dataset.delopt) { read(); dd.options.splice(Number(t.dataset.delopt), 1); draw(); }
+      else if (t.dataset.addeff) { read(); dd.options[Number(t.dataset.addeff)].effects.push({ type: 'set', expense_id: null, amount: NaN }); draw(); }
+      else if (t.dataset.deleff) { read(); const [oi, fi] = t.dataset.deleff.split(':').map(Number); dd.options[oi].effects.splice(fi, 1); draw(); }
+    });
+    $('#dlg').addEventListener('change', (ev) => { if (ev.target.dataset.k === 'type') { read(); draw(); } });
+    if ($('#delDec')) $('#delDec').onclick = async () => {
+      const b = $('#delDec'); if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; return; }
+      try { await api('DELETE', '/api/decisions/' + src.id); closeModal(); await load(); } catch (e) { $('#decErr').textContent = e.message; }
+    };
+    $('#saveDec').onclick = async () => {
+      read();
+      const err = (m) => { $('#decErr').textContent = m; };
+      if (!dd.title) return err('Bitte die Frage eintragen.');
+      for (const o of dd.options) {
+        if (!o.label) return err('Bitte jeder Option einen Namen geben.');
+        for (const f of o.effects) {
+          if (!Number.isFinite(f.amount)) return err(`Option „${o.label}“: Betrag fehlt oder nicht erkannt.`);
+          if (f.type === 'set' && !f.expense_id) return err(`Option „${o.label}“: bitte eine Position wählen.`);
+        }
+      }
+      try {
+        if (src) await api('PUT', '/api/decisions/' + src.id, { title: dd.title, note: dd.note, options: dd.options });
+        else await api('POST', '/api/decisions', { title: dd.title, note: dd.note, options: dd.options });
+        closeModal(); await load();
+      } catch (e) { err(e.message); }
+    };
+  }
+
+  function applyDecisionDialog(did, oid) {
+    const d = (S.decisions || []).find((x) => x.id === did); if (!d) return;
+    const o = d.options.find((x) => x.id === oid); if (!o) return;
+    openModal(`<h2>„${esc(o.label)}“ übernehmen?</h2>
+      <div class="muted small">Damit wird „${esc(d.title)}“ als entschieden markiert und die Kosten werden in eure Positionen geschrieben:</div>
+      <ul class="eff">${o.effects.map((f) => `<li>${esc(effectLabel(f))}${f.type === 'add' ? ' <span class="muted">(neue Position)</span>' : ''}</li>`).join('')}</ul>
+      <div class="muted small">Vorher wird automatisch ein Backup angelegt.</div>
+      <div class="err" id="apErr"></div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="doApply">Übernehmen</button></div>`);
+    $('#cancel').onclick = closeModal;
+    $('#doApply').onclick = async () => {
+      try { await api('POST', `/api/decisions/${did}/apply`, { option_id: oid }); closeModal(); await load(); }
+      catch (e) { $('#apErr').textContent = e.message; }
+    };
+  }
+
+  function scenarioDialog(id) {
+    const sc = id ? (S.scenarios || []).find((x) => x.id === id) : null;
+    const ch = sc ? { ...sc.choices } : {};
+    openModal(`<h2>${sc ? 'Szenario bearbeiten' : 'Neues Szenario'}</h2>
+      <div class="form">
+        <label class="full">Name *<input id="scName" value="${esc(sc ? sc.name : '')}" placeholder="z. B. „Sparvariante“ oder „Alles drin“"></label>
+        ${openDecisions().map((d) => `<label class="full">${esc(d.title)}<select data-scdec="${d.id}"><option value="">– wie geplant –</option>${d.options.map((o) => `<option value="${esc(o.id)}" ${ch[d.id] === o.id ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>`).join('')}
+      </div>
+      <div class="err" id="scErr"></div>
+      <div class="actions">${sc ? '<button class="danger" id="delSc">Löschen</button>' : ''}<span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="saveSc">Speichern</button></div>`);
+    $('#cancel').onclick = closeModal;
+    if ($('#delSc')) $('#delSc').onclick = async () => {
+      const b = $('#delSc'); if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; return; }
+      await api('DELETE', '/api/scenarios/' + sc.id); closeModal(); await load();
+    };
+    $('#saveSc').onclick = async () => {
+      const name = $('#scName').value.trim(); if (!name) { $('#scErr').textContent = 'Bitte einen Namen eingeben.'; return; }
+      const choices = {}; document.querySelectorAll('[data-scdec]').forEach((s2) => { if (s2.value) choices[s2.dataset.scdec] = s2.value; });
+      try {
+        if (sc) await api('PUT', '/api/scenarios/' + sc.id, { name, choices }); else await api('POST', '/api/scenarios', { name, choices });
+        closeModal(); await load();
+      } catch (e) { $('#scErr').textContent = e.message; }
+    };
+  }
+
+  // ---------- Gewährleistung ----------
+  const WARRANTY = [
+    { m: 24, l: '2 Jahre – Kauf / Lieferung (z. B. Küche, Geräte)' },
+    { m: 48, l: '4 Jahre – Bauvertrag nach VOB/B' },
+    { m: 60, l: '5 Jahre – Bauwerk nach BGB (Werkvertrag)' },
+  ];
+  const isoToday = () => new Date().toISOString().slice(0, 10);
+  function addMonthsIso(iso, n) {
+    const [y, m, d] = iso.split('-').map(Number);
+    const t = new Date(Date.UTC(y, m - 1 + n, 1));
+    const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+    t.setUTCDate(Math.min(d, last));
+    return t.toISOString().slice(0, 10);
+  }
+  const daysUntil = (iso) => Math.round((Date.parse(iso + 'T00:00:00Z') - Date.parse(isoToday() + 'T00:00:00Z')) / 864e5);
+  function warrantyOf(e) {
+    const start = e.warranty_start || (e.status === 'bezahlt' ? e.date : '');
+    if (!e.warranty_months || !start) return null;
+    const end = addMonthsIso(start, e.warranty_months);
+    const check = addMonthsIso(end, -3);
+    const left = daysUntil(end);
+    return { start, end, check, left, state: left < 0 ? 'abgelaufen' : left <= 90 ? 'bald' : daysUntil(check) <= 0 ? 'begehung' : 'laeuft', implicit: !e.warranty_start };
+  }
+  const W_LABEL = { abgelaufen: 'abgelaufen', bald: 'endet bald', begehung: 'Begehung fällig', laeuft: 'läuft' };
+  const durLabel = (m) => (m % 12 === 0 ? `${m / 12} J.` : `${m} Mon.`);
+
+  function viewWarranty() {
+    const rows = S.expenses.map((e) => ({ e, w: warrantyOf(e) })).filter((x) => x.w).sort((a, b) => a.w.end.localeCompare(b.w.end));
+    const missing = S.expenses.filter((e) => e.status === 'bezahlt' && counts(e) && !e.warranty_months).sort(byCode);
+    let html = `<div class="note" style="margin-top:0">Für jede bezahlte Leistung läuft eine Gewährleistungsfrist ab der <b>Abnahme</b>. Mängel müsst ihr <b>vor</b> Ablauf schriftlich anzeigen – Kassensturz erinnert euch drei Monate vorher an eine Begehung. Die Dauer hängt vom Vertrag ab (keine Rechtsberatung).</div>`;
+    html += `<div class="card" style="margin-top:12px"><h2>Fristen</h2>`;
+    if (!rows.length) html += `<div class="muted small">Noch keine Gewährleistung eingetragen. Im Dialog einer Position unter „Gewährleistung“ Abnahme und Dauer wählen – oder unten mit einem Klick für bezahlte Positionen setzen.</div>`;
+    else if (mobile) {
+      html += rows.map(({ e, w }) => `<div class="mcard click" data-edit="${e.id}"><div class="top"><span class="ttl">${esc((e.code ? e.code + ' ' : '') + e.title)}</span><span class="chip w-${w.state}">${W_LABEL[w.state]}</span></div>
+        <div class="mstats"><div><small>Ende</small><b>${fdate(w.end)}</b></div><div><small>Begehung bis</small>${fdate(w.check)}</div><div><small>Beginn${w.implicit ? ' (Rechnungsdatum)' : ''}</small>${fdate(w.start)}</div><div><small>Firma</small>${esc(e.vendor || '–')}</div></div></div>`).join('');
+    } else {
+      html += `<div style="overflow-x:auto"><table><thead><tr><th>Position</th><th>Firma</th><th>Beginn</th><th>Dauer</th><th>Begehung bis</th><th>Ende</th><th></th></tr></thead><tbody>
+        ${rows.map(({ e, w }) => `<tr class="click" data-edit="${e.id}"><td>${esc((e.code ? e.code + ' ' : '') + e.title)}${e.warranty_note ? `<div class="muted small">${esc(e.warranty_note)}</div>` : ''}</td>
+          <td class="small">${esc(e.vendor || '–')}</td><td class="small">${fdate(w.start)}${w.implicit ? '<div class="muted small">Rechnungsdatum</div>' : ''}</td>
+          <td class="small">${durLabel(e.warranty_months)}</td><td class="small">${fdate(w.check)}</td><td><b>${fdate(w.end)}</b></td><td><span class="chip w-${w.state}">${W_LABEL[w.state]}</span></td></tr>`).join('')}
+      </tbody></table></div>`;
+    }
+    html += `</div>`;
+    if (missing.length) {
+      html += `<div class="card" style="margin-top:12px"><h2>Bezahlt, aber ohne Gewährleistungsfrist</h2><div class="muted small" style="margin-bottom:8px">Beginn = Abnahme. Falls unbekannt, nimmt Kassensturz das Rechnungsdatum bzw. heute.</div>
+        ${missing.map((e) => `<div class="mrow wrow"><span style="flex:1">${esc((e.code ? e.code + ' ' : '') + e.title)}<span class="muted small"> · ${esc(e.vendor || '')} ${e.date ? fdate(e.date) : ''}</span></span>
+          ${WARRANTY.map((p) => `<button class="iconbtn" data-setw="${e.id}:${p.m}" title="${esc(p.l)}">${durLabel(p.m)}</button>`).join('')}</div>`).join('')}</div>`;
+    }
+    // Kalender-Abo
+    html += `<div class="card" style="margin-top:12px"><h2>Fristen im Handy-Kalender</h2>
+      <div class="muted small">Ein Kalender-Abo mit allen Zahlungs-Fälligkeiten, Begehungs-Terminen und Gewährleistungsenden – mit Erinnerung. Funktioniert mit iPhone/Mac-Kalender und unter Android z. B. mit ICSx⁵, solange das Gerät eure NAS erreicht (z. B. über Tailscale). Google Kalender im Browser kann die NAS nicht erreichen.</div>
+      <div id="icsBox" style="margin-top:10px"><button id="icsShow">Abo-Link anzeigen</button></div></div>`;
+    return html;
+  }
+  async function showIcs(regenerate) {
+    const box = $('#icsBox'); if (!box) return;
+    try {
+      let t = regenerate ? (await api('POST', '/api/calendar/token')).token : (await api('GET', '/api/calendar/token')).token;
+      if (!t) t = (await api('POST', '/api/calendar/token')).token;
+      const http = `${location.origin}/api/calendar.ics?token=${t}`;
+      const webcal = http.replace(/^https?:/, 'webcal:');
+      box.innerHTML = `<div class="mrow" style="flex-wrap:wrap"><a class="btn primary" href="${esc(webcal)}">Im Kalender abonnieren</a><button id="icsCopy" data-url="${esc(http)}">Link kopieren</button><button id="icsNew">Neuen Link erzeugen</button></div>
+        <div class="small muted" style="margin-top:8px;overflow-wrap:anywhere">${esc(http)}</div>
+        <div class="small muted" style="margin-top:4px">Der Link ist geheim: Wer ihn kennt, sieht eure Fristen (keine Beträge der Finanzierung). „Neuen Link erzeugen“ macht den alten ungültig.</div>`;
+    } catch (e) { box.textContent = e.message; }
+  }
+
+  // ---------- Leistungsbeschreibung / Angebote ----------
+  let docAnalysis = null; let docAnalysisRev = -1; let docLoading = false; let docFilter = 'fund';
+  const V = {
+    ja: { l: '✓ enthalten', c: 'v-ja' }, nein: { l: '✗ nicht enthalten', c: 'v-nein' }, 'nein?': { l: '✗? eher nicht', c: 'v-nein' },
+    teils: { l: '◐ teilweise', c: 'v-unklar' }, erwaehnt: { l: '? erwähnt', c: 'v-unklar' }, unklar: { l: '? unklar', c: 'v-unklar' }, fehlt: { l: '– nicht erwähnt', c: 'v-fehlt' },
+  };
+  const SUGGEST = { ja: 'ja', nein: 'nein', 'nein?': 'nein', teils: 'pruefen', erwaehnt: 'pruefen', unklar: 'pruefen', fehlt: null };
+  async function loadDocAnalysis() {
+    if (docLoading) return;
+    docLoading = true;
+    try { docAnalysis = (await api('GET', '/api/documents/analysis')).documents; docAnalysisRev = S.rev; }
+    catch (e) { docAnalysis = { error: e.message }; }
+    docLoading = false;
+    if (tab === 'planung' && planTab === 'leistungsbeschreibung') render();
+  }
+  function viewDocuments() {
+    const ds = S.documents || [];
+    let html = `<div class="toolbar"><div class="muted">Bau- und Leistungsbeschreibung oder Angebot als PDF hochladen. Kassensturz sucht zu jeder Position die passende Textstelle und schlägt „Im Hauspreis?“ vor – mehrere Dokumente nebeneinander = Anbieter-Vergleich.</div>
+      <span class="spacer"></span>${ocrOn() ? '<button class="primary" id="addDoc">+ Dokument</button>' : ''}</div>`;
+    if (!ds.length) return html + `<div class="card"><div class="empty">Noch kein Dokument. Lade z. B. die Bau- und Leistungsbeschreibung von FingerHaus und von Büdenbender hoch.</div></div>`;
+    if (docAnalysisRev !== S.rev) { loadDocAnalysis(); }
+    html += `<div class="doclist">${ds.map((d) => `<div class="docchip"><b>${esc(d.title)}</b><span class="muted small">${esc(d.vendor || '')} · ${d.pages} S. · ${fsize(d.size)}</span>
+      <a class="iconbtn" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">Öffnen</a><button class="iconbtn" data-applydoc="${d.id}">Vorschläge übernehmen</button><button class="iconbtn" data-deldoc="${d.id}">✕</button></div>`).join('')}</div>`;
+    if (!docAnalysis || docAnalysis.error) return html + `<div class="card"><div class="muted">${docAnalysis && docAnalysis.error ? esc(docAnalysis.error) : 'Prüfe Dokumente …'}</div></div>`;
+    const A = new Map(docAnalysis.map((a) => [a.id, a]));
+    const cols = ds.filter((d) => A.has(d.id));
+    const keep = (e) => {
+      const vs = cols.map((d) => (A.get(d.id).byExpense[e.id] || {}).verdict);
+      if (docFilter === 'alle') return true;
+      if (docFilter === 'diff') return vs.some((v) => SUGGEST[v] && SUGGEST[v] !== e.included) || (cols.length > 1 && new Set(vs.map((v) => SUGGEST[v] || '-')).size > 1);
+      return vs.some((v) => v && v !== 'fehlt');
+    };
+    html += `<div class="toolbar"><select id="docFilter"><option value="fund" ${docFilter === 'fund' ? 'selected' : ''}>Nur Positionen mit Fundstelle</option><option value="diff" ${docFilter === 'diff' ? 'selected' : ''}>Nur Abweichungen</option><option value="alle" ${docFilter === 'alle' ? 'selected' : ''}>Alle Positionen</option></select>
+      <span class="muted small">Klick auf ein Ergebnis zeigt die Textstelle.</span></div>`;
+    const groups = S.categories.map((c) => ({ c, items: S.expenses.filter((e) => e.category_id === c.id && keep(e)).sort(byCode) })).filter((g) => g.items.length);
+    const cell = (d, e) => { const r = A.get(d.id).byExpense[e.id] || { verdict: 'fehlt' }; const v = V[r.verdict] || V.fehlt;
+      return `<button class="vchip ${v.c}" data-docfind="${d.id}:${e.id}">${v.l}${r.page ? `<span class="pg">S. ${r.page}</span>` : ''}</button>`; };
+    if (!groups.length) html += `<div class="card"><div class="muted">Keine Positionen für diesen Filter.</div></div>`;
+    else if (mobile) {
+      html += groups.map((g) => `<details class="mgroup" open><summary><span class="nm">${esc(g.c.name)}</span></summary>${g.items.map((e) => `<div class="mcard">
+        <div class="top"><span class="code">${esc(e.code)}</span><span class="ttl">${esc(e.title)}</span><span class="chip i-${e.included}">${IL[e.included]}</span></div>
+        <div class="vlist">${cols.map((d) => `<div class="mrow"><span class="small muted" style="flex:1">${esc(d.vendor || d.title)}</span>${cell(d, e)}</div>`).join('')}</div></div>`).join('')}</details>`).join('');
+    } else {
+      html += `<div class="card" style="padding:4px 8px;overflow-x:auto"><table class="doctable"><thead><tr><th>Nr</th><th>Kostenpunkt</th><th>Im Hauspreis?</th>${cols.map((d) => `<th>${esc(d.vendor || d.title)}</th>`).join('')}</tr></thead>
+        ${groups.map((g) => `<tbody><tr class="group"><td colspan="${3 + cols.length}">${esc(g.c.name)}</td></tr>${g.items.map((e) => `<tr><td class="small muted">${esc(e.code)}</td><td>${esc(e.title)}</td><td><span class="chip i-${e.included}">${IL[e.included]}</span></td>${cols.map((d) => `<td>${cell(d, e)}</td>`).join('')}</tr>`).join('')}</tbody>`).join('')}
+      </table></div>`;
+    }
+    // Kostenfallen
+    cols.forEach((d) => {
+      const tr = A.get(d.id).traps;
+      if (!tr.length) return;
+      html += `<details class="card traps" style="margin-top:12px"><summary><b>Mögliche Kostenfallen in „${esc(d.title)}“</b> <span class="muted small">${tr.length} Stellen mit „nicht enthalten“, „bauseits“, „Eigenleistung“ … ohne passende Position</span></summary>
+        ${tr.map((x, i) => `<div class="trap"><span class="pg">S. ${x.page}</span><span style="flex:1">${esc(x.snippet)}</span><button class="iconbtn" data-trap="${d.id}:${i}">Als Position anlegen</button></div>`).join('')}</details>`;
+    });
+    return html;
+  }
+  function docFindDialog(did, eid) {
+    const d = (S.documents || []).find((x) => x.id === did); const e = S.expenses.find((x) => x.id === eid);
+    const a = docAnalysis && docAnalysis.find((x) => x.id === did); if (!d || !e || !a) return;
+    const r = a.byExpense[e.id] || { verdict: 'fehlt' };
+    const v = V[r.verdict] || V.fehlt; const sug = SUGGEST[r.verdict];
+    const mark = (t) => { let h = esc(t); [/(nicht\s+enthalten|bauseits|eigenleistung|gegen\s+aufpreis|mehrpreis|aufpreis|entf(?:ä|ae)llt|optional|sonderwunsch|nicht\s+im\s+\w+)/gi, /(enthalten|inklusive|inkl\.|im\s+lieferumfang|serienm(?:ä|ae)(?:ss|ß)ig)/gi].forEach((re, i) => { h = h.replace(re, (x) => `<mark class="${i ? 'mpos' : 'mneg'}">${x}</mark>`); }); return h; };
+    openModal(`<h2>${esc((e.code ? e.code + ' ' : '') + e.title)}</h2>
+      <div class="muted small">${esc(d.title)}${d.vendor ? ' · ' + esc(d.vendor) : ''}</div>
+      <div style="margin:10px 0"><span class="vchip ${v.c}">${v.l}</span> <span class="muted small">aktuell „Im Hauspreis?“: <b>${IL[e.included]}</b></span></div>
+      ${r.snippet ? `<blockquote class="quote"><span class="pg">S. ${r.page}</span> ${mark(r.snippet)}</blockquote>${(r.more || []).map((x) => `<blockquote class="quote dim"><span class="pg">S. ${x.page}</span> ${mark(x.snippet)}</blockquote>`).join('')}`
+        : '<div class="muted">Im Dokument wurde zu dieser Position nichts gefunden. Bei einer Leistungsbeschreibung heißt das meist: nicht enthalten.</div>'}
+      <div class="small muted" style="margin-top:10px">„Im Hauspreis?“ setzen:</div>
+      <div class="mrow" style="margin-top:6px;flex-wrap:wrap">${INCL.map((x) => `<button class="${sug === x.k ? 'primary' : ''}" data-setincl="${x.k}">${x.l}${sug === x.k ? ' (Vorschlag)' : ''}</button>`).join('')}</div>
+      <div class="err" id="dfErr"></div>
+      <div class="actions"><a class="btn" href="/api/documents/${d.id}/file#page=${r.page || 1}" target="_blank" rel="noopener">Dokument öffnen</a><span class="spacer"></span><button id="cancel">Schließen</button></div>`);
+    $('#cancel').onclick = closeModal;
+    document.querySelectorAll('[data-setincl]').forEach((b) => { b.onclick = async () => {
+      try { await api('POST', '/api/documents/apply', { changes: [{ expense_id: e.id, included: b.dataset.setincl }] }); closeModal(); await load(); }
+      catch (err) { $('#dfErr').textContent = err.message; }
+    }; });
+  }
+  function applyDocDialog(did) {
+    const d = (S.documents || []).find((x) => x.id === did); const a = docAnalysis && docAnalysis.find((x) => x.id === did);
+    if (!d || !a) return;
+    const rows = S.expenses.map((e) => ({ e, r: a.byExpense[e.id] })).filter(({ e, r }) => r && SUGGEST[r.verdict] && SUGGEST[r.verdict] !== e.included).sort((x, y) => byCode(x.e, y.e));
+    openModal(`<h2>Vorschläge aus „${esc(d.title)}“</h2>
+      <div class="muted small">Nur sinnvoll für das Angebot, für das ihr euch entscheidet. Sicher erkannte Fundstellen sind vorausgewählt – bitte kurz prüfen.</div>
+      ${rows.length ? `<div class="applylist">${rows.map(({ e, r }) => `<label class="mrow"><input type="checkbox" data-apply="${e.id}" data-to="${SUGGEST[r.verdict]}" ${r.verdict === 'ja' || r.verdict === 'nein' ? 'checked' : ''}>
+        <span style="flex:1">${esc((e.code ? e.code + ' ' : '') + e.title)}<span class="muted small"> · S. ${r.page}</span></span><span class="chip i-${e.included}">${IL[e.included]}</span> → <span class="chip i-${SUGGEST[r.verdict]}">${IL[SUGGEST[r.verdict]]}</span></label>`).join('')}</div>`
+        : '<div class="empty">Keine Abweichungen – eure Einordnung passt zu diesem Dokument.</div>'}
+      <div class="err" id="adErr"></div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button>${rows.length ? '<button class="primary" id="doApplyDoc">Ausgewählte übernehmen</button>' : ''}</div>`);
+    $('#cancel').onclick = closeModal;
+    if ($('#doApplyDoc')) $('#doApplyDoc').onclick = async () => {
+      const changes = [...document.querySelectorAll('[data-apply]')].filter((c) => c.checked).map((c) => ({ expense_id: Number(c.dataset.apply), included: c.dataset.to }));
+      try { await api('POST', '/api/documents/apply', { changes }); closeModal(); await load(); } catch (e) { $('#adErr').textContent = e.message; }
+    };
+  }
+  function uploadDocDialog() {
+    openModal(`<h2>Dokument prüfen</h2>
+      <form id="docForm" class="form">
+        <label class="full">PDF (Bau- und Leistungsbeschreibung, Angebot, Vertrag) *<input type="file" name="file" accept="application/pdf,image/*" required></label>
+        <label>Titel<input name="title" placeholder="z. B. Bau- und Leistungsbeschreibung"></label>
+        <label>Anbieter<input name="vendor" placeholder="z. B. FingerHaus"></label>
+      </form>
+      <div class="scanwait" hidden><div class="spin"></div><div class="muted small">Lese das Dokument … lange PDFs oder Scans können eine Minute dauern.</div></div>
+      <div class="err" id="docErr"></div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="doDoc">Hochladen &amp; prüfen</button></div>`);
+    $('#cancel').onclick = closeModal;
+    $('#doDoc').onclick = async () => {
+      const f = $('#docForm'); const file = f.file.files[0];
+      if (!file) { $('#docErr').textContent = 'Bitte eine Datei wählen.'; return; }
+      $('#doDoc').disabled = true; $('.scanwait').hidden = false; $('#docErr').textContent = '';
+      try {
+        await api('POST', '/api/documents', file, { 'Content-Type': file.type || 'application/pdf', 'X-Filename': encodeURIComponent(file.name),
+          'X-Title': encodeURIComponent(f.title.value.trim()), 'X-Vendor': encodeURIComponent(f.vendor.value.trim()) });
+        closeModal(); docAnalysisRev = -1; await load();
+      } catch (e) { $('#doDoc').disabled = false; $('.scanwait').hidden = true; $('#docErr').textContent = e.message; }
+    };
+  }
+
+  // ---------- Eingang (Belege aus dem Postfach) ----------
+  function inboxCard() {
+    const items = S.inbox || [];
+    if (!items.length) return '';
+    return `<div class="card inbox"><div class="mrow"><h2 style="flex:1;margin:0">📥 Eingang aus dem Postfach <span class="badge">${items.length}</span></h2></div>
+      ${items.map((it) => { const f = (it.scan && it.scan.fields) || {};
+        return `<div class="inrow"><div style="flex:1;min-width:0"><b>${esc(f.title || it.filename)}</b>
+          <div class="muted small">${esc(it.mail_from)}${it.subject ? ' · ' + esc(it.subject) : ''} · ${esc(it.filename)}</div></div>
+          <span class="strong">${f.amount ? fmt2.format(f.amount) : ''}</span>
+          <button class="iconbtn primary" data-inbox="${it.id}">Prüfen</button><button class="iconbtn" data-inboxdel="${it.id}" title="Verwerfen">✕</button></div>`; }).join('')}</div>`;
+  }
+  function openInbox(id) {
+    const it = (S.inbox || []).find((x) => x.id === id); if (!it) return;
+    const result = it.scan && it.scan.fields ? it.scan : { method: '', text: (it.scan && it.scan.error) || '', fields: {}, matches: [], category_id: null };
+    const best = result.matches && result.matches[0];
+    expenseDialog(best && best.score >= 3 ? best.id : null, { result, file: { name: it.filename, size: it.size }, inboxId: it.id, from: it.mail_from, subject: it.subject });
+  }
+
+  // ---------- Nächste Fristen (Übersicht) ----------
+  function deadlinesCard() {
+    const items = [];
+    S.expenses.forEach((e) => {
+      if (e.status === 'beauftragt' && e.due && counts(e)) { const d = daysUntil(e.due); if (d <= 30) items.push({ d, date: e.due, e, kind: d < 0 ? 'Zahlung überfällig' : 'Zahlung fällig', cls: d < 0 ? 'neg' : '' }); }
+      const w = warrantyOf(e);
+      if (w) {
+        const dc = daysUntil(w.check);
+        if (w.left >= 0 && dc <= 60) items.push({ d: Math.max(dc, 0), date: dc > 0 ? w.check : w.end, e, kind: dc > 0 ? 'Begehung vor Gewährleistungsende' : 'Gewährleistung endet', cls: w.left <= 30 ? 'neg' : '' });
+      }
+    });
+    items.sort((a, b) => a.date.localeCompare(b.date));
+    const nIn = (S.inbox || []).length;
+    if (!items.length && !nIn) return '';
+    return `<div class="card"><h2>Nächste Fristen</h2>
+      ${nIn ? `<a class="inlink" href="#kosten">📥 ${nIn} neue${nIn === 1 ? 'r Beleg' : ' Belege'} im Eingang</a>` : ''}
+      ${items.length ? `<table><tbody>${items.slice(0, 8).map((x) => `<tr class="click" data-edit="${x.e.id}"><td>${esc(x.e.title)}<div class="small ${x.cls || 'muted'}">${x.kind}</div></td><td class="num small">${fdate(x.date)}<div class="muted">${x.d < 0 ? `seit ${-x.d} T.` : x.d === 0 ? 'heute' : `in ${x.d} T.`}</div></td></tr>`).join('')}</tbody></table>` : ''}
+    </div>`;
   }
 
   // ---------- Beleg scannen ----------
@@ -1198,6 +1699,40 @@
     try {
       if (t.id === 'addExp') { expenseDialog(null); return; }
       if (t.id === 'scanDoc') { pickScanFile(); return; }
+      if (t.id === 'addDecision') { decisionDialog(null); return; }
+      if (t.dataset.editdec) { decisionDialog(Number(t.dataset.editdec)); return; }
+      if (t.dataset.reopendec) { await mutate('PUT', '/api/decisions/' + t.dataset.reopendec, { reopen: true }); return; }
+      if (t.dataset.applyopt) { const [a, b] = t.dataset.applyopt.split(':'); applyDecisionDialog(Number(a), b); return; }
+      if (t.id === 'addScenario') { scenarioDialog(null); return; }
+      if (t.dataset.editsc) { scenarioDialog(Number(t.dataset.editsc)); return; }
+      if (t.dataset.setw) {
+        const [eid, months] = t.dataset.setw.split(':').map(Number); const e = S.expenses.find((x) => x.id === eid); if (!e) return;
+        await mutate('PUT', '/api/expenses/' + eid, { ...e, category_id: e.category_id, warranty_months: months, warranty_start: e.warranty_start || e.date || isoToday() });
+        return;
+      }
+      if (t.id === 'icsShow') { showIcs(false); return; }
+      if (t.id === 'icsNew') { if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Alter Link wird ungültig – sicher?'; return; } showIcs(true); return; }
+      if (t.id === 'icsCopy') { try { await navigator.clipboard.writeText(t.dataset.url); t.textContent = 'Kopiert ✓'; } catch (e) { t.textContent = 'Bitte manuell kopieren'; } return; }
+      if (t.id === 'addDoc') { uploadDocDialog(); return; }
+      if (t.dataset.deldoc) { if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Löschen?'; t.classList.add('danger'); return; } await mutate('DELETE', '/api/documents/' + t.dataset.deldoc); docAnalysisRev = -1; return; }
+      if (t.dataset.applydoc) { applyDocDialog(Number(t.dataset.applydoc)); return; }
+      if (t.closest('[data-docfind]')) { const [a, b] = t.closest('[data-docfind]').dataset.docfind.split(':').map(Number); docFindDialog(a, b); return; }
+      if (t.dataset.trap) {
+        const [did, i] = t.dataset.trap.split(':').map(Number); const a = docAnalysis.find((x) => x.id === did); const d = (S.documents || []).find((x) => x.id === did);
+        const tr = a && a.traps[i]; if (!tr) return;
+        expenseDialog(null, { prefill: { title: tr.snippet.replace(/\s+/g, ' ').slice(0, 80), hint: `Laut „${d ? d.title : 'Dokument'}“, S. ${tr.page}: ${tr.snippet}`, included: 'nein', status: 'geplant' } });
+        return;
+      }
+      if (t.dataset.inbox) { openInbox(Number(t.dataset.inbox)); return; }
+      if (t.dataset.inboxdel) { if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Verwerfen?'; t.classList.add('danger'); return; } await mutate('POST', `/api/inbox/${t.dataset.inboxdel}/dismiss`); return; }
+      if (t.id === 'mailTest' || t.id === 'mailRun') {
+        const out = $('#mailOut'); out.className = 'small muted'; out.textContent = t.id === 'mailTest' ? 'Verbinde …' : 'Rufe ab …'; t.disabled = true;
+        try {
+          if (t.id === 'mailTest') { const r = await api('POST', '/api/mail/test'); out.className = 'okmsg'; out.textContent = `Verbindung ok – ${r.messages} Nachricht(en) im Ordner, ${r.unseen} ungelesen.`; }
+          else { const r = await api('POST', '/api/mail/run'); out.className = 'okmsg'; out.textContent = `${r.attachments} Beleg(e) aus ${r.messages} Nachricht(en) übernommen${r.ignoredSenders ? `, ${r.ignoredSenders} von unbekannten Absendern ignoriert` : ''}.`; await load(); }
+        } catch (e) { out.className = 'err'; out.textContent = e.message; }
+        t.disabled = false; return;
+      }
       if (t.id === 'filtToggle') { filtOpen = !filtOpen; render(); return; }
       if (t.dataset.splitmode) { switchSplitMode(t.dataset.for, t.dataset.splitmode); return; }
       if (t.dataset.savesplit) {
@@ -1271,6 +1806,7 @@
     if (t.id === 'fcat') { filt.cat = t.value; render(); return; }
     if (t.id === 'fst') { filt.st = t.value; render(); return; }
     if (t.id === 'finc') { filt.inc = t.value; render(); return; }
+    if (t.id === 'docFilter') { docFilter = t.value; render(); return; }
     if (t.dataset.cat) {
       const c = S.categories.find((x) => x.id === Number(t.dataset.cat)); if (!c) return;
       let v = t.value;
@@ -1322,6 +1858,17 @@
       catch (e) { $('#setErr').textContent = e.message; }
       return;
     }
+    if (f.id === 'mailForm') {
+      ev.preventDefault();
+      const d = Object.fromEntries(new FormData(f));
+      const secure = d.secure !== 'plain';
+      const out = $('#mailOut');
+      try {
+        await api('PUT', '/api/mail', { enabled: !!d.enabled, host: d.host, port: secure ? 993 : 143, secure, user: d.user, pass: d.pass || '', folder: d.folder, done_folder: d.done_folder, allowed: d.allowed, interval: Number(d.interval) });
+        await load(); const o2 = $('#mailOut'); if (o2) { o2.className = 'okmsg'; o2.textContent = 'Gespeichert.'; }
+      } catch (e) { out.className = 'err'; out.textContent = e.message; }
+      return;
+    }
     if (f.id === 'impForm') {
       ev.preventDefault();
       $('#impErr').textContent = ''; $('#impOk').textContent = '';
@@ -1358,6 +1905,7 @@
   function route() {
     let h = location.hash.replace('#', '');
     if (h === 'ausgaben') h = 'kosten';
+    if (PLAN_TABS.includes(h)) { planTab = h; h = 'planung'; }
     tab = TABS.includes(h) ? h : 'uebersicht'; render();
   }
   window.addEventListener('hashchange', route);

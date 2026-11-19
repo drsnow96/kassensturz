@@ -13,7 +13,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const MAX_PAGES = 3;
-const TIMEOUT = 90 * 1000;
+const TIMEOUT = 5 * 60 * 1000;
 
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -38,17 +38,18 @@ async function available() {
 function isPdf(buf, mime) { return mime === 'application/pdf' || buf.slice(0, 5).toString() === '%PDF-'; }
 
 /** Text aus einem Beleg holen. Liefert {text, method}. */
-async function extractText(buf, mime) {
+async function extractText(buf, mime, opts = {}) {
+  const maxPages = opts.maxPages || MAX_PAGES, maxOcr = opts.maxOcrPages || MAX_PAGES;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ks-ocr-'));
   try {
     if (isPdf(buf, mime)) {
       const pdf = path.join(dir, 'in.pdf');
       fs.writeFileSync(pdf, buf);
       let text = '';
-      try { text = await run('pdftotext', ['-layout', '-l', String(MAX_PAGES), pdf, '-']); } catch (e) { if (e.code === 'ENOENT') throw e; }
+      try { text = await run('pdftotext', ['-layout', '-l', String(maxPages), pdf, '-']); } catch (e) { if (e.code === 'ENOENT') throw e; }
       if (text.replace(/\s/g, '').length >= 40) return { text, method: 'pdf-text' };
       // gescanntes PDF: Seiten als Bild rendern und erkennen
-      await run('pdftoppm', ['-r', '300', '-gray', '-png', '-f', '1', '-l', String(MAX_PAGES), pdf, path.join(dir, 'p')]);
+      await run('pdftoppm', ['-r', '300', '-gray', '-png', '-f', '1', '-l', String(maxOcr), pdf, path.join(dir, 'p')]);
       const pages = fs.readdirSync(dir).filter((n) => /^p-?\d+\.png$/.test(n)).sort();
       const parts = [];
       for (const p of pages) parts.push(await tesseract(path.join(dir, p)));

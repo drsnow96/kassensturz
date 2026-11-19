@@ -145,13 +145,12 @@ test('Migration v1 → v2 behält Daten, Import und Aufteilung funktionieren', a
   try {
     await call('POST', '/api/setup', { username: 'person1', display_name: 'Person 1', password: 'geheim-genug-123' });
     await call('POST', '/api/users', { username: 'person2', display_name: 'Person 2', password: 'geheim-genug-456' });
-    const st = await call('GET', '/api/state');
-    ids = st.body.users.map((u) => u.id);
   } finally { await stop(srv); }
   {
     // Eintrag direkt im alten Schema anlegen (so wie ihn v1.0 geschrieben hätte)
     const { DatabaseSync } = require('node:sqlite');
     const d = new DatabaseSync(path.join(DATA, 'kassensturz.sqlite'));
+    ids = d.prepare('SELECT id FROM users ORDER BY id').all().map((u) => u.id);
     const cat = d.prepare('SELECT id FROM categories ORDER BY id LIMIT 1').get().id;
     const r = d.prepare(`INSERT INTO expenses (title, amount, status, category_id, created_by, created_at, updated_by, updated_at)
                          VALUES ('Alter Eintrag', 123.45, 'bezahlt', ?, ?, 'x', ?, 'x')`).run(cat, ids[0], ids[0]);

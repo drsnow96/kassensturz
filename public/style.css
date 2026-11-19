@@ -279,3 +279,61 @@ body.dropping main::after{content:'Beleg hier ablegen';position:fixed;inset:12px
   display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:600;color:var(--paid);background:color-mix(in srgb, var(--bg) 85%, transparent);z-index:20;pointer-events:none}
 input[type=radio]{width:auto!important;min-height:0!important;padding:0;border:0;accent-color:var(--paid);flex:none}
 body.mobile .scanmatch label{width:100%}
+
+/* ---------- Planung ---------- */
+.planseg{margin-bottom:14px;display:flex;width:max-content;max-width:100%}
+.planseg a{padding:8px 14px;color:var(--muted);text-decoration:none;font-weight:500;white-space:nowrap}
+.planseg a.on{background:var(--paid);color:#fff}
+body.mobile .planseg{width:100%}
+body.mobile .planseg a{flex:1;text-align:center;padding:10px 4px;font-size:13px}
+.badge{display:inline-block;min-width:18px;padding:0 5px;border-radius:9px;background:var(--warn);color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center}
+nav .badge{margin-left:2px}
+.decgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
+body.mobile .decgrid{grid-template-columns:1fr;gap:10px}
+.dec.done{opacity:.75}
+.opts{display:grid;gap:8px;margin-top:10px}
+.opt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px}
+.opt.chosen{border-color:var(--paid);box-shadow:0 0 0 1px var(--paid) inset}
+.opt .iconbtn{margin-top:6px}
+ul.eff{margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--muted)}
+.optedit{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px}
+.effrow{display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap}
+.effrow .grow{flex:1;min-width:140px}
+.effrow .amt{width:150px}
+body.mobile .effrow select, body.mobile .effrow input{width:100%;flex:1 1 100%}
+.sctable td{vertical-align:top}
+.sctable th .iconbtn{padding:2px 6px;margin-left:4px}
+.wrow{padding:6px 0;border-bottom:1px solid var(--line);font-size:13px;gap:6px}
+.w-laeuft{background:var(--bg);color:var(--ink)}
+.w-begehung{background:var(--opt);color:#fff}
+.w-bald{background:var(--warn);color:#fff}
+.w-abgelaufen{background:transparent;border:1px solid var(--line);color:var(--muted)}
+.wbox{border-top:1px solid var(--line);padding-top:8px}
+.wbox summary{cursor:pointer}
+.doclist{display:grid;gap:6px;margin-bottom:12px}
+.docchip{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+.docchip b{margin-right:auto}
+.vchip{border:0;border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:600;white-space:nowrap;cursor:pointer;min-height:0;display:inline-flex;gap:6px;align-items:center}
+.vchip .pg{font-weight:400;opacity:.75}
+.v-ja{background:color-mix(in srgb, var(--ok) 18%, var(--card));color:var(--ok)}
+.v-nein{background:color-mix(in srgb, var(--warn) 16%, var(--card));color:var(--warn)}
+.v-unklar{background:color-mix(in srgb, var(--opt) 18%, var(--card));color:var(--opt)}
+.v-fehlt{background:var(--bg);color:var(--muted)}
+.vlist{display:grid;gap:6px;margin-top:8px}
+.quote{margin:10px 0;padding:10px 12px;border-left:3px solid var(--comm);background:var(--bg);border-radius:6px;font-size:13px}
+.quote.dim{opacity:.7}
+.quote .pg, .trap .pg{display:inline-block;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:0 6px;font-size:11px;margin-right:6px;color:var(--muted);white-space:nowrap}
+mark.mneg{background:color-mix(in srgb, var(--warn) 25%, transparent);color:inherit}
+mark.mpos{background:color-mix(in srgb, var(--ok) 25%, transparent);color:inherit}
+.traps summary{cursor:pointer}
+.trap{display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+body.mobile .trap{flex-wrap:wrap}
+.applylist{display:grid;gap:6px;margin:10px 0;max-height:55vh;overflow:auto}
+.applylist label{gap:8px;font-size:13px;padding:6px 0;border-bottom:1px solid var(--line)}
+.inbox{margin-bottom:12px;border-color:var(--opt)}
+.inrow{display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.inrow .iconbtn.primary{background:var(--paid);color:#fff;border-color:var(--paid)}
+body.mobile .inrow{flex-wrap:wrap}
+.inlink{display:block;margin-bottom:8px;color:var(--paid);font-weight:600;text-decoration:none}
+body.mobile .inrow > div:first-child{flex-basis:100%}
+body.mobile .inrow .strong{margin-right:auto}

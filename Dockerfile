@@ -10,7 +10,7 @@ ENV NODE_ENV=production \
     TZ=Europe/Berlin
 
 WORKDIR /app
-COPY package.json server.js ocr.js docker-entrypoint.sh ./
+COPY package.json server.js ocr.js docs.js mail.js docker-entrypoint.sh ./
 COPY public ./public
 RUN chmod +x docker-entrypoint.sh
 
