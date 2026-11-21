@@ -275,6 +275,13 @@ const MIGRATIONS = [
   CREATE INDEX idx_asset_files ON asset_files(asset_id);
   CREATE INDEX idx_asset_log ON asset_log(asset_id);
   `,
+  // 6: Bereich „Grundstück“ (Kaufpreis, Grunderwerbsteuer, Notar, Grundbuch, Makler) – nur falls nicht vorhanden,
+  //    ganz oben einsortiert und ohne Reserve, weil der Kaufpreis feststeht.
+  `
+  INSERT INTO categories (name, budget, sort, reserve)
+    SELECT 'Grundstück', 0, COALESCE((SELECT MIN(sort) FROM categories), 10) - 1, 0
+    WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name LIKE 'Grundstück%');
+  `,
 ];
 
 function stamp() {
