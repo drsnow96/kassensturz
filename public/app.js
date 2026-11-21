@@ -953,6 +953,10 @@
         <div class="err" id="setErr"></div><div class="okmsg" id="setOk"></div>
       </div>
       ${mailCard()}
+      <div class="card"><h2>QR-Aufkleber</h2>
+        <div class="small">${qrBaseLine()}</div>
+        <div class="muted small" style="margin-top:6px">Diese Adresse steckt in jedem gedruckten Aufkleber im Hausordner. Am besten der feste Tailscale-Name der NAS.</div>
+      </div>
       <div class="card"><h2>Mein Konto</h2>
         <form id="meForm">
           <label>Anzeigename<input name="display_name" value="${esc(S.me ? S.me.display_name : '')}" required></label>
@@ -1675,6 +1679,7 @@
 
   const qrBase = () => (S.qr_base || location.origin).replace(/\/+$/, '');
   const assetUrl = (a) => `${qrBase()}/#teil-${a.code}`;
+  const qrBaseLine = () => `QR-Codes zeigen auf <b>${esc(qrBase())}</b>${S.qr_base ? '' : ' <span class="neg">(noch nicht festgelegt)</span>'} · <a href="#" data-qrbase>Adresse ändern</a>`;
   function assetState(a) {
     const out = {};
     const base = a.last_service || a.installed;
@@ -1708,6 +1713,7 @@
       ${mobile ? '' : '<span class="spacer"></span>'}
       <button id="assetFromPos">Aus Positionen</button><button id="labels">🏷 Etiketten drucken</button><button class="primary" id="addAsset">+ Bauteil</button>
     </div>`;
+    if (!S.qr_base) html += `<div class="note" style="margin:0 0 12px">📍 Vor dem ersten Etikettendruck: ${qrBaseLine()}</div>`;
     if (overdue || soon) html += `<div class="note" style="margin:0 0 12px">${overdue ? `<b class="neg">${overdue} Wartung${overdue > 1 ? 'en' : ''} überfällig</b>` : ''}${overdue && soon ? ' · ' : ''}${soon ? `${soon} in den nächsten 30 Tagen` : ''}</div>`;
     if (!all.length) {
       return html + `<div class="card"><div class="empty">Noch nichts im Hausordner.<br><br>Hier sammelt ihr alles, was im Haus verbaut ist – Wärmepumpe, Lüftung, Wechselrichter, Küchengeräte, Fenster, Rauchmelder – mit Modell, Seriennummer, Anleitung, Rechnung, Gewährleistung und Wartung. Am schnellsten über „Aus Positionen“ starten. Jedes Teil bekommt einen QR-Aufkleber, der direkt hierher führt.</div></div>`;
@@ -1729,7 +1735,7 @@
         </div>`;
       }).join('')}</div>`;
     });
-    html += `<div class="muted small" style="margin-top:16px">QR-Codes zeigen auf <b>${esc(qrBase())}</b> · <a href="#" id="qrBaseEdit">Adresse ändern</a> – am besten die feste Tailscale-Adresse eurer NAS, damit gedruckte Aufkleber dauerhaft funktionieren.</div>`;
+    html += `<div class="muted small" style="margin-top:16px">${qrBaseLine()} – am besten die feste Tailscale-Adresse eurer NAS, damit gedruckte Aufkleber dauerhaft funktionieren.</div>`;
     return html;
   }
 
@@ -1901,6 +1907,7 @@
         <label class="mrow small"><input type="radio" name="lfmt" value="gross"> groß · 105 × 57 mm (10 je A4)</label></div>
       <div class="mrow small"><button class="iconbtn" id="lAll">alle</button><button class="iconbtn" id="lNone">keine</button></div>
       <div class="applylist">${all.map((a) => `<label class="mrow"><input type="checkbox" data-label="${a.id}" checked><span style="flex:1">${(ACL[a.category] || ACL.sonstiges).i} ${esc(a.name)}<span class="muted small"> · ${esc(a.location || '')}</span></span></label>`).join('')}</div>
+      <div class="note small" style="margin:8px 0">${qrBaseLine()}</div>
       <div class="muted small">Tipp: Drucken in Originalgröße (100 %, „Tatsächliche Größe“) auf Etikettenbogen oder normales Papier zum Ausschneiden; für Feuchträume laminierte oder Folien-Etiketten.</div>
       <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="doLabels">Drucken</button></div>`);
     $('#cancel').onclick = closeModal;
@@ -1985,6 +1992,7 @@
   // ---------- Events ----------
   document.addEventListener('click', async (ev) => {
     const t = ev.target;
+    if (t.closest('[data-qrbase]')) { ev.preventDefault(); if (document.getElementById('modal').classList.contains('open')) closeModal(); qrBaseDialog(); return; }
     if (t.closest('a')) return; // Links in Zeilen öffnen, nicht den Dialog
     const row = t.closest('[data-edit]'); if (row) { expenseDialog(Number(row.dataset.edit)); return; }
     const ld = t.closest('[data-loandetail]');
@@ -2022,7 +2030,6 @@
       if (t.id === 'addAsset') { assetEditDialog(null); return; }
       if (t.id === 'assetFromPos') { fromPositionsDialog(); return; }
       if (t.id === 'labels') { labelsDialog(); return; }
-      if (t.id === 'qrBaseEdit') { ev.preventDefault(); qrBaseDialog(); return; }
       if (t.closest('[data-asset]') && !$('#modal').classList.contains('open')) { assetDialog(Number(t.closest('[data-asset]').dataset.asset)); return; }
       if (t.dataset.inboxdel) { if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Verwerfen?'; t.classList.add('danger'); return; } await mutate('POST', `/api/inbox/${t.dataset.inboxdel}/dismiss`); return; }
       if (t.id === 'mailTest' || t.id === 'mailRun') {
