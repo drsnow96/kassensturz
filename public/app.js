@@ -18,7 +18,7 @@
   ];
   const IL = Object.fromEntries(INCL.map((s) => [s.k, s.l]));
   const NOCAT = 'none';
-  const TABS = ['uebersicht', 'kosten', 'budget', 'finanzierung', 'planung', 'einstellungen'];
+  const TABS = ['uebersicht', 'kosten', 'budget', 'finanzierung', 'planung', 'haus', 'einstellungen'];
   const PLAN_TABS = ['szenarien', 'leistungsbeschreibung', 'gewaehrleistung'];
   let planTab = 'szenarien';
 
@@ -75,6 +75,7 @@
     try {
       S = await api('GET', '/api/state');
       setSync('Aktuell', 'ok');
+      setTimeout(openPendingTeil, 0);
       $('#who').textContent = S.me ? 'Angemeldet als ' + S.me.display_name : '';
       render();
     } catch (e) {
@@ -341,6 +342,7 @@
     else if (tab === 'budget') v.innerHTML = mobile ? viewBudgetMobile() : viewBudget();
     else if (tab === 'finanzierung') v.innerHTML = viewFinance();
     else if (tab === 'planung') v.innerHTML = viewPlanning();
+    else if (tab === 'haus') v.innerHTML = viewHouse();
     else if (tab === 'einstellungen') { v.innerHTML = viewSettings(); loadBackups(); }
     else v.innerHTML = viewOverview();
     if (keep) {
@@ -1640,13 +1642,306 @@
         if (w.left >= 0 && dc <= 60) items.push({ d: Math.max(dc, 0), date: dc > 0 ? w.check : w.end, e, kind: dc > 0 ? 'Begehung vor Gewährleistungsende' : 'Gewährleistung endet', cls: w.left <= 30 ? 'neg' : '' });
       }
     });
+    (S.assets || []).forEach((a) => {
+      const st = assetState(a);
+      if (st.due && st.dueIn <= 30) items.push({ d: st.dueIn, date: st.due, asset: a, e: { id: 0, title: a.name }, kind: st.dueIn < 0 ? 'Wartung überfällig' : 'Wartung fällig', cls: st.dueIn < 0 ? 'neg' : '' });
+    });
     items.sort((a, b) => a.date.localeCompare(b.date));
     const nIn = (S.inbox || []).length;
     if (!items.length && !nIn) return '';
     return `<div class="card"><h2>Nächste Fristen</h2>
       ${nIn ? `<a class="inlink" href="#kosten">📥 ${nIn} neue${nIn === 1 ? 'r Beleg' : ' Belege'} im Eingang</a>` : ''}
-      ${items.length ? `<table><tbody>${items.slice(0, 8).map((x) => `<tr class="click" data-edit="${x.e.id}"><td>${esc(x.e.title)}<div class="small ${x.cls || 'muted'}">${x.kind}</div></td><td class="num small">${fdate(x.date)}<div class="muted">${x.d < 0 ? `seit ${-x.d} T.` : x.d === 0 ? 'heute' : `in ${x.d} T.`}</div></td></tr>`).join('')}</tbody></table>` : ''}
+      ${items.length ? `<table><tbody>${items.slice(0, 8).map((x) => `<tr class="click" ${x.asset ? `data-asset="${x.asset.id}"` : `data-edit="${x.e.id}"`}><td>${esc(x.e.title)}<div class="small ${x.cls || 'muted'}">${x.kind}</div></td><td class="num small">${fdate(x.date)}<div class="muted">${x.d < 0 ? `seit ${-x.d} T.` : x.d === 0 ? 'heute' : `in ${x.d} T.`}</div></td></tr>`).join('')}</tbody></table>` : ''}
     </div>`;
+  }
+
+  // =====================================================================
+  // Digitaler Hausordner + QR-Etiketten
+  // =====================================================================
+  const ACATS = [
+    { k: 'heizung', l: 'Heizung & Warmwasser', i: '🔥' }, { k: 'lueftung', l: 'Lüftung & Klima', i: '🌬' }, { k: 'elektro', l: 'Elektro, PV & Smart Home', i: '⚡' },
+    { k: 'sanitaer', l: 'Sanitär & Wasser', i: '🚿' }, { k: 'kueche', l: 'Küche & Geräte', i: '🍳' }, { k: 'fenster', l: 'Fenster, Türen & Sonnenschutz', i: '🪟' },
+    { k: 'dach', l: 'Dach & Fassade', i: '🏠' }, { k: 'aussen', l: 'Außenanlagen', i: '🌳' }, { k: 'sicherheit', l: 'Sicherheit & Brandschutz', i: '🚨' },
+    { k: 'sonstiges', l: 'Sonstiges', i: '📦' },
+  ];
+  const ACL = Object.fromEntries(ACATS.map((c) => [c.k, c]));
+  const FILE_KINDS = [['anleitung', 'Anleitung'], ['datenblatt', 'Datenblatt'], ['foto', 'Foto'], ['rechnung', 'Rechnung'], ['protokoll', 'Protokoll'], ['dokument', 'Dokument']];
+  const FKL = Object.fromEntries(FILE_KINDS);
+  const LOG_KINDS = [['wartung', 'Wartung'], ['pruefung', 'Prüfung'], ['reparatur', 'Reparatur'], ['notiz', 'Notiz']];
+  const LKL = Object.fromEntries(LOG_KINDS);
+  const MAINT = [[3, 'alle 3 Monate'], [6, 'alle 6 Monate'], [12, 'jährlich'], [24, 'alle 2 Jahre'], [60, 'alle 5 Jahre']];
+  const GUAR = [[24, '2 Jahre (gesetzlich, Kauf)'], [60, '5 Jahre (Bauwerk)'], [120, '10 Jahre (Herstellergarantie)']];
+  let houseFilt = { q: '', cat: '', group: 'ort' };
+
+  const qrBase = () => (S.qr_base || location.origin).replace(/\/+$/, '');
+  const assetUrl = (a) => `${qrBase()}/#teil-${a.code}`;
+  function assetState(a) {
+    const out = {};
+    const base = a.last_service || a.installed;
+    if (a.maintenance_months && base) {
+      const due = addMonthsIso(base, a.maintenance_months);
+      out.due = due; out.dueIn = daysUntil(due);
+    }
+    const ws = a.warranty_start || a.installed;
+    const exp = a.expense_id ? S.expenses.find((e) => e.id === a.expense_id) : null;
+    if (a.warranty_months && ws) out.warrantyEnd = addMonthsIso(ws, a.warranty_months);
+    else if (exp) { const w = warrantyOf(exp); if (w) out.warrantyEnd = w.end; }
+    if (out.warrantyEnd) out.warrantyIn = daysUntil(out.warrantyEnd);
+    out.exp = exp;
+    return out;
+  }
+  const dueChip = (st) => (st.due ? `<span class="chip ${st.dueIn < 0 ? 'w-bald' : st.dueIn <= 30 ? 'w-begehung' : 'w-laeuft'}">🔧 ${st.dueIn < 0 ? `Wartung seit ${-st.dueIn} T. fällig` : st.dueIn === 0 ? 'Wartung heute' : st.dueIn <= 60 ? `Wartung in ${st.dueIn} T.` : `Wartung ${fdate(st.due)}`}</span>` : '');
+  const warChip = (st) => (st.warrantyEnd ? `<span class="chip ${st.warrantyIn < 0 ? 'w-abgelaufen' : st.warrantyIn <= 90 ? 'w-bald' : 'w-laeuft'}">🛡 ${st.warrantyIn < 0 ? 'Gewährl. abgelaufen' : 'bis ' + fdate(st.warrantyEnd)}</span>` : '');
+
+  function viewHouse() {
+    const all = S.assets || [];
+    const q = houseFilt.q.toLowerCase();
+    const list = all.filter((a) => (!houseFilt.cat || a.category === houseFilt.cat)
+      && (!q || `${a.name} ${a.manufacturer} ${a.model} ${a.serial} ${a.location} ${a.notes}`.toLowerCase().includes(q)));
+    const states = new Map(all.map((a) => [a.id, assetState(a)]));
+    const overdue = all.filter((a) => { const st = states.get(a.id); return st.due && st.dueIn < 0; }).length;
+    const soon = all.filter((a) => { const st = states.get(a.id); return st.due && st.dueIn >= 0 && st.dueIn <= 30; }).length;
+    let html = `<div class="toolbar">
+      <input id="hq" type="search" placeholder="Suchen: Gerät, Modell, Seriennr., Raum …" value="${esc(houseFilt.q)}" style="min-width:220px;flex:1">
+      <select id="hcat"><option value="">Alle Bereiche</option>${ACATS.map((c) => `<option value="${c.k}" ${houseFilt.cat === c.k ? 'selected' : ''}>${c.i} ${c.l}</option>`).join('')}</select>
+      <select id="hgroup"><option value="ort" ${houseFilt.group === 'ort' ? 'selected' : ''}>nach Ort</option><option value="cat" ${houseFilt.group === 'cat' ? 'selected' : ''}>nach Bereich</option></select>
+      ${mobile ? '' : '<span class="spacer"></span>'}
+      <button id="assetFromPos">Aus Positionen</button><button id="labels">🏷 Etiketten drucken</button><button class="primary" id="addAsset">+ Bauteil</button>
+    </div>`;
+    if (overdue || soon) html += `<div class="note" style="margin:0 0 12px">${overdue ? `<b class="neg">${overdue} Wartung${overdue > 1 ? 'en' : ''} überfällig</b>` : ''}${overdue && soon ? ' · ' : ''}${soon ? `${soon} in den nächsten 30 Tagen` : ''}</div>`;
+    if (!all.length) {
+      return html + `<div class="card"><div class="empty">Noch nichts im Hausordner.<br><br>Hier sammelt ihr alles, was im Haus verbaut ist – Wärmepumpe, Lüftung, Wechselrichter, Küchengeräte, Fenster, Rauchmelder – mit Modell, Seriennummer, Anleitung, Rechnung, Gewährleistung und Wartung. Am schnellsten über „Aus Positionen“ starten. Jedes Teil bekommt einen QR-Aufkleber, der direkt hierher führt.</div></div>`;
+    }
+    const keyOf = (a) => (houseFilt.group === 'cat' ? (ACL[a.category] || ACL.sonstiges).l : (a.location || 'Ohne Ort'));
+    const groups = new Map();
+    list.forEach((a) => { const k = keyOf(a); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); });
+    const keys = [...groups.keys()].sort((x, y) => (x === 'Ohne Ort') - (y === 'Ohne Ort') || x.localeCompare(y, 'de'));
+    if (!list.length) html += `<div class="card"><div class="empty">Keine Treffer.</div></div>`;
+    keys.forEach((k) => {
+      html += `<h2 class="hgroup">${esc(k)} <span class="muted small">${groups.get(k).length}</span></h2><div class="assetgrid">${groups.get(k).map((a) => {
+        const st = states.get(a.id); const c = ACL[a.category] || ACL.sonstiges;
+        const docs = a.files.filter((f) => f.kind !== 'foto').length, photos = a.files.filter((f) => f.kind === 'foto').length;
+        return `<div class="card asset click" data-asset="${a.id}">
+          <div class="mrow"><span class="aicon">${c.i}</span><div style="flex:1;min-width:0"><b>${esc(a.name)}</b>
+            <div class="muted small">${esc([a.manufacturer, a.model].filter(Boolean).join(' ') || c.l)}</div></div></div>
+          <div class="chips">${dueChip(st)}${warChip(st)}${houseFilt.group === 'cat' && a.location ? `<span class="chip k-sonstig">📍 ${esc(a.location)}</span>` : ''}</div>
+          <div class="muted small" style="margin-top:6px">${docs ? `📄 ${docs}` : ''} ${photos ? `🖼 ${photos}` : ''} ${a.log.length ? `🗒 ${a.log.length}` : ''} ${a.serial ? `· SN ${esc(a.serial)}` : ''}</div>
+        </div>`;
+      }).join('')}</div>`;
+    });
+    html += `<div class="muted small" style="margin-top:16px">QR-Codes zeigen auf <b>${esc(qrBase())}</b> · <a href="#" id="qrBaseEdit">Adresse ändern</a> – am besten die feste Tailscale-Adresse eurer NAS, damit gedruckte Aufkleber dauerhaft funktionieren.</div>`;
+    return html;
+  }
+
+  function assetDialog(id) {
+    const a = (S.assets || []).find((x) => x.id === id); if (!a) return;
+    const st = assetState(a); const c = ACL[a.category] || ACL.sonstiges;
+    const row = (l, v) => (v ? `<div><small>${l}</small><span>${v}</span></div>` : '');
+    const docs = a.files.filter((f) => f.kind !== 'foto'), photos = a.files.filter((f) => f.kind === 'foto');
+    openModal(`<div class="mrow" style="align-items:flex-start"><span class="aicon big">${c.i}</span><div style="flex:1;min-width:0"><h2 style="margin:0">${esc(a.name)}</h2>
+        <div class="muted small">${esc(c.l)}${a.location ? ' · 📍 ' + esc(a.location) : ''}</div></div>
+        <div class="qrsmall" title="QR-Code für ${esc(a.name)}">${window.KSQR ? window.KSQR.svg(assetUrl(a), { margin: 2 }) : ''}</div></div>
+      <div class="chips" style="margin-top:8px">${dueChip(st)}${warChip(st)}</div>
+      <div class="loanstats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+        ${row('Hersteller', esc(a.manufacturer))}${row('Modell / Typ', esc(a.model))}
+        ${a.serial ? `<div><small>Seriennummer</small><span class="mono">${esc(a.serial)}</span> <button class="iconbtn" data-copy="${esc(a.serial)}">⧉</button></div>` : ''}
+        ${row('Eingebaut / in Betrieb', fdate(a.installed))}
+        ${st.exp ? `<div><small>Rechnung / Position</small><a href="#" data-openexp="${st.exp.id}">${esc((st.exp.code ? st.exp.code + ' ' : '') + st.exp.title)}</a>${st.exp.vendor ? `<div class="muted small">${esc(st.exp.vendor)}</div>` : ''}</div>` : ''}
+        ${row('Gewährleistung / Garantie bis', st.warrantyEnd ? fdate(st.warrantyEnd) : '')}
+        ${a.maintenance_months ? `<div><small>Wartung</small><span>${esc((MAINT.find((x) => x[0] === a.maintenance_months) || [0, `alle ${a.maintenance_months} Monate`])[1])}</span>${st.due ? `<div class="small ${st.dueIn < 0 ? 'neg' : 'muted'}">nächste: ${fdate(st.due)}</div>` : ''}</div>` : ''}
+      </div>
+      ${a.maintenance_note ? `<div class="note">🔧 ${esc(a.maintenance_note)}</div>` : ''}
+      ${a.notes ? `<div class="small" style="margin-top:10px;white-space:pre-wrap">${linkify(a.notes)}</div>` : ''}
+      ${photos.length ? `<div class="thumbs">${photos.map((f) => `<a href="/api/asset-files/${f.id}" target="_blank" rel="noopener"><img src="/api/asset-files/${f.id}" alt="${esc(f.filename)}" loading="lazy"></a>`).join('')}</div>` : ''}
+      <h3 class="dh">Dokumente</h3>
+      ${docs.length ? docs.map((f) => `<div class="att"><span class="chip k-sonstig">${FKL[f.kind] || 'Dokument'}</span><a href="/api/asset-files/${f.id}" target="_blank" rel="noopener">${esc(f.filename)}</a><span class="muted small">${fsize(f.size)}</span><button class="iconbtn" data-delafile="${f.id}">✕</button></div>`).join('') : '<div class="muted small">Noch keine Anleitung oder Datenblatt.</div>'}
+      ${st.exp && st.exp.attachments.length ? `<div class="muted small" style="margin-top:6px">Belege der Position: ${st.exp.attachments.map((x) => `<a href="/api/attachments/${x.id}" target="_blank" rel="noopener">${esc(x.filename)}</a>`).join(' · ')}</div>` : ''}
+      <div class="mrow" style="margin-top:8px;flex-wrap:wrap"><select id="afKind" style="width:auto">${FILE_KINDS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select><input type="file" id="afFile" multiple accept="application/pdf,image/*" style="flex:1"><button class="iconbtn" id="afUp">Hochladen</button></div>
+      <h3 class="dh">Wartung & Protokoll</h3>
+      <form id="logForm" class="logform">
+        <select name="kind">${LOG_KINDS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+        <input type="date" name="date" value="${isoToday()}">
+        <input name="text" placeholder="Was wurde gemacht? z. B. Filter F7 getauscht">
+        <input name="cost" inputmode="decimal" placeholder="Kosten €">
+        <button class="primary" type="submit">Eintragen</button>
+      </form>
+      ${a.log.length ? `<div class="loglist">${a.log.map((l) => `<div class="att"><span class="chip ${l.kind === 'reparatur' ? 'w-bald' : 'k-sonstig'}">${LKL[l.kind]}</span><span style="flex:1">${fdate(l.date)} · ${esc(l.text || '')}${l.by_user ? ` <span class="muted small">(${esc(userName(l.by_user))})</span>` : ''}</span>${l.cost != null ? `<span class="small">${fmt2.format(l.cost)}</span>` : ''}<button class="iconbtn" data-dellog="${l.id}">✕</button></div>`).join('')}</div>` : '<div class="muted small">Noch keine Einträge.</div>'}
+      <div class="err" id="asErr"></div>
+      <div class="actions"><button id="asLabel">🏷 Etikett drucken</button><span class="spacer"></span><button id="cancel">Schließen</button><button class="primary" id="asEdit">Bearbeiten</button></div>`);
+    $('#cancel').onclick = () => { closeModal(); if (location.hash.startsWith('#teil-')) history.replaceState(null, '', '#haus'); };
+    $('#asEdit').onclick = () => assetEditDialog(a.id);
+    $('#asLabel').onclick = () => printLabels([a], 'gross');
+    $('#afUp').onclick = async () => {
+      const files = $('#afFile').files; if (!files.length) return;
+      try {
+        for (const f of files) await api('POST', `/api/assets/${a.id}/files`, f, { 'Content-Type': f.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(f.name), 'X-Kind': $('#afKind').value });
+        await load(); assetDialog(a.id);
+      } catch (e) { $('#asErr').textContent = e.message; }
+    };
+    $('#logForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const d = Object.fromEntries(new FormData(ev.target));
+      const cost = d.cost.trim() ? parseAmount(d.cost) : null;
+      if (d.cost.trim() && !Number.isFinite(cost)) { $('#asErr').textContent = 'Kosten nicht erkannt.'; return; }
+      try { await api('POST', `/api/assets/${a.id}/log`, { ...d, cost }); await load(); assetDialog(a.id); } catch (e) { $('#asErr').textContent = e.message; }
+    });
+    $('#dlg').onclick = async (ev) => {
+      const t = ev.target;
+      if (t.dataset.copy) { try { await navigator.clipboard.writeText(t.dataset.copy); t.textContent = '✓'; } catch (e) { /* egal */ } }
+      if (t.dataset.openexp) { ev.preventDefault(); expenseDialog(Number(t.dataset.openexp)); }
+      if (t.dataset.delafile || t.dataset.dellog) {
+        if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Löschen?'; t.classList.add('danger'); return; }
+        try { await api('DELETE', t.dataset.delafile ? `/api/asset-files/${t.dataset.delafile}` : `/api/asset-log/${t.dataset.dellog}`); await load(); assetDialog(a.id); }
+        catch (e) { $('#asErr').textContent = e.message; }
+      }
+    };
+  }
+
+  function assetEditDialog(id, preset) {
+    const a = id ? (S.assets || []).find((x) => x.id === id) : null;
+    const d = a ? { ...a } : { name: '', category: 'sonstiges', ...(preset || {}) };
+    const locs = [...new Set((S.assets || []).map((x) => x.location).filter(Boolean))].sort();
+    const posOpts = `<option value="">– keine –</option>${S.categories.map((c) => `<optgroup label="${esc(c.name)}">${S.expenses.filter((e) => e.category_id === c.id).sort(byCode).map((e) => `<option value="${e.id}" ${d.expense_id === e.id ? 'selected' : ''}>${esc((e.code ? e.code + ' ' : '') + e.title)}</option>`).join('')}</optgroup>`).join('')}`;
+    const sel = (name, opts, v, custom) => `<select name="${name}"><option value="">${custom}</option>${opts.map(([m2, l]) => `<option value="${m2}" ${Number(v) === m2 ? 'selected' : ''}>${l}</option>`).join('')}${v && !opts.some((o) => o[0] === Number(v)) ? `<option value="${v}" selected>${v} Monate</option>` : ''}<option value="custom">eigene Monate …</option></select>`;
+    openModal(`<h2>${a ? 'Bauteil bearbeiten' : 'Bauteil anlegen'}</h2>
+      <form id="assetForm" class="form">
+        <label class="full">Bezeichnung *<input name="name" required value="${esc(d.name)}" placeholder="z. B. Wärmepumpe Außengerät"></label>
+        <label class="wide">Bereich<select name="category">${ACATS.map((c) => `<option value="${c.k}" ${d.category === c.k ? 'selected' : ''}>${c.i} ${c.l}</option>`).join('')}</select></label>
+        <label class="wide">Ort / Raum<input name="location" list="locList" value="${esc(d.location || '')}" placeholder="z. B. Technikraum, Küche, Dach"><datalist id="locList">${locs.map((l) => `<option value="${esc(l)}">`).join('')}</datalist></label>
+        <label>Hersteller<input name="manufacturer" value="${esc(d.manufacturer || '')}"></label>
+        <label>Modell / Typ<input name="model" value="${esc(d.model || '')}"></label>
+        <label>Seriennummer<input name="serial" value="${esc(d.serial || '')}"></label>
+        <label>Eingebaut / in Betrieb<input type="date" name="installed" value="${esc(d.installed || '')}"></label>
+        <label class="full">Verknüpfte Position (Rechnung, Firma, Gewährleistung)<select name="expense_id">${posOpts}</select></label>
+        <label>Gewährleistung / Garantie${sel('warranty_months', GUAR, d.warranty_months, '– aus der Position –')}</label>
+        <label>ab (leer = Einbau)<input type="date" name="warranty_start" value="${esc(d.warranty_start || '')}"></label>
+        <label>Wartung${sel('maintenance_months', MAINT, d.maintenance_months, 'keine')}</label>
+        <label>Zuletzt gewartet<input type="date" name="last_service" value="${esc(d.last_service || '')}"></label>
+        <label class="full">Was ist bei der Wartung zu tun?<input name="maintenance_note" value="${esc(d.maintenance_note || '')}" placeholder="z. B. Filter ISO ePM1 tauschen, Kondensatablauf prüfen"></label>
+        <label class="full">Notizen (Links werden klickbar)<textarea name="notes" rows="3">${esc(d.notes || '')}</textarea></label>
+        ${a ? '' : `<label class="full">Anleitung / Foto (optional)<input type="file" name="files" multiple accept="application/pdf,image/*"></label>`}
+      </form>
+      <div class="err" id="aeErr"></div>
+      <div class="actions">${a ? '<button class="danger" id="delAsset">Löschen</button>' : ''}<span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="saveAsset">Speichern</button></div>`);
+    const form = $('#assetForm');
+    form.querySelectorAll('select').forEach((s2) => s2.addEventListener('change', () => {
+      if (s2.value !== 'custom') return;
+      s2.insertAdjacentHTML('afterend', `<input name="${s2.name}" inputmode="numeric" placeholder="Anzahl Monate" style="margin-top:4px">`);
+      s2.removeAttribute('name'); s2.disabled = true;
+    }));
+    $('#cancel').onclick = () => (a ? assetDialog(a.id) : closeModal());
+    if ($('#delAsset')) $('#delAsset').onclick = async () => {
+      const b = $('#delAsset'); if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Mit allen Dateien löschen?'; return; }
+      try { await api('DELETE', '/api/assets/' + a.id); closeModal(); await load(); } catch (e) { $('#aeErr').textContent = e.message; }
+    };
+    const save = async () => {
+      const body = Object.fromEntries(new FormData(form)); delete body.files;
+      if (!body.name.trim()) { $('#aeErr').textContent = 'Bitte eine Bezeichnung eingeben.'; return; }
+      body.expense_id = body.expense_id ? Number(body.expense_id) : null;
+      $('#saveAsset').disabled = true;
+      try {
+        let aid = a && a.id;
+        if (a) await api('PUT', '/api/assets/' + a.id, body);
+        else {
+          aid = (await api('POST', '/api/assets', body)).id;
+          const files = form.files ? form.files.files : [];
+          for (const f of files) await api('POST', `/api/assets/${aid}/files`, f, { 'Content-Type': f.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(f.name), 'X-Kind': /^image\//.test(f.type) ? 'foto' : 'anleitung' });
+        }
+        await load(); assetDialog(aid);
+      } catch (e) { $('#saveAsset').disabled = false; $('#aeErr').textContent = e.message; }
+    };
+    $('#saveAsset').onclick = save;
+    form.addEventListener('submit', (ev) => { ev.preventDefault(); save(); });
+  }
+
+  // Vorschläge aus Positionen: Bereich und Wartung aus Stichwörtern
+  const GUESS = [
+    [/wärmepumpe|waermepumpe|heiz|warmwasser|speicher|fußbodenheiz|fussbodenheiz/i, 'heizung', 12, 'Jährliche Wartung durch Fachbetrieb, Druck und Kältemittel prüfen'],
+    [/lüftung|lueftung|wohnraumlüft|klima|split/i, 'lueftung', 6, 'Filter prüfen/tauschen, Außen- und Fortluft frei halten'],
+    [/kamin|ofen|schornstein/i, 'heizung', 12, 'Reinigung, Schornsteinfeger-Termin'],
+    [/pv|photovoltaik|wechselrichter|batterie|wallbox|elektro|knx|smart|zähler|zaehler|leitung/i, 'elektro', 0, ''],
+    [/rauchmelder|brand|alarm|einbruch/i, 'sicherheit', 12, 'Funktionstest, Batterie prüfen'],
+    [/küche|kueche|geräte|geraete|backofen|kochfeld|spül|kühl/i, 'kueche', 0, ''],
+    [/fenster|tür|tuer|raffstore|rollladen|markise|sonnenschutz|garage/i, 'fenster', 12, 'Beschläge ölen, Dichtungen pflegen, Motoren prüfen'],
+    [/dach|rinne|fassade|putz|dämm|daemm/i, 'dach', 12, 'Dachrinnen reinigen, Sichtprüfung'],
+    [/zisterne|wasser|sanitär|sanitaer|bad|wc|enthärt|filter/i, 'sanitaer', 12, 'Wasserfilter spülen/tauschen'],
+    [/garten|terrasse|zaun|carport|pflaster|außen|aussen/i, 'aussen', 0, ''],
+  ];
+  function fromPositionsDialog() {
+    const linked = new Set((S.assets || []).map((a) => a.expense_id).filter(Boolean));
+    const cand = S.expenses.filter((e) => counts(e) && (e.status === 'bezahlt' || e.status === 'beauftragt') && !linked.has(e.id)).sort(byCode);
+    openModal(`<h2>Bauteile aus Positionen anlegen</h2>
+      <div class="muted small">Bezahlte und beauftragte Positionen, die noch kein Bauteil haben. Bereich und Wartung werden aus dem Namen geschätzt – Modell und Seriennummer ergänzt ihr später, am besten direkt vor dem Gerät per QR-Code.</div>
+      ${cand.length ? `<div class="applylist">${cand.map((e) => { const g = GUESS.find(([re]) => re.test(e.title)); const c = ACL[g ? g[1] : 'sonstiges'];
+        return `<label class="mrow"><input type="checkbox" data-frompos="${e.id}" ${g ? 'checked' : ''}><span style="flex:1">${esc((e.code ? e.code + ' ' : '') + e.title)}<span class="muted small"> · ${esc(e.vendor || '')}</span></span><span class="small">${c.i} ${esc(c.l)}</span></label>`; }).join('')}</div>`
+        : '<div class="empty">Keine passenden Positionen – Bauteile könnt ihr auch einzeln anlegen.</div>'}
+      <div class="err" id="fpErr"></div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button>${cand.length ? '<button class="primary" id="doFromPos">Anlegen</button>' : ''}</div>`);
+    $('#cancel').onclick = closeModal;
+    if ($('#doFromPos')) $('#doFromPos').onclick = async () => {
+      const ids = [...document.querySelectorAll('[data-frompos]:checked')].map((c2) => Number(c2.dataset.frompos));
+      try {
+        for (const eid of ids) {
+          const e = S.expenses.find((x) => x.id === eid); const g = GUESS.find(([re]) => re.test(e.title));
+          await api('POST', '/api/assets', { name: e.title.replace(/\s*\(.*?\)\s*/g, ' ').trim().slice(0, 120), category: g ? g[1] : 'sonstiges', expense_id: e.id,
+            installed: e.warranty_start || (e.status === 'bezahlt' ? e.date : ''), maintenance_months: g && g[2] ? g[2] : null, maintenance_note: g ? g[3] : '', manufacturer: '' });
+        }
+        closeModal(); await load();
+      } catch (e2) { $('#fpErr').textContent = e2.message; }
+    };
+  }
+
+  // ---------- Etiketten ----------
+  function labelsDialog() {
+    const all = S.assets || [];
+    if (!all.length) return;
+    openModal(`<h2>QR-Etiketten drucken</h2>
+      <div class="muted small">Aufkleber für Technikraum, Sicherungskasten, Lüftungsgerät, Geräte … Scannen öffnet direkt das Bauteil im Hausordner (Anmeldung nötig).</div>
+      <div class="mrow" style="margin:10px 0;flex-wrap:wrap"><label class="mrow small"><input type="radio" name="lfmt" value="klein" checked> klein · 48,5 × 25,4 mm (40 je A4)</label>
+        <label class="mrow small"><input type="radio" name="lfmt" value="gross"> groß · 105 × 57 mm (10 je A4)</label></div>
+      <div class="mrow small"><button class="iconbtn" id="lAll">alle</button><button class="iconbtn" id="lNone">keine</button></div>
+      <div class="applylist">${all.map((a) => `<label class="mrow"><input type="checkbox" data-label="${a.id}" checked><span style="flex:1">${(ACL[a.category] || ACL.sonstiges).i} ${esc(a.name)}<span class="muted small"> · ${esc(a.location || '')}</span></span></label>`).join('')}</div>
+      <div class="muted small">Tipp: Drucken in Originalgröße (100 %, „Tatsächliche Größe“) auf Etikettenbogen oder normales Papier zum Ausschneiden; für Feuchträume laminierte oder Folien-Etiketten.</div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="doLabels">Drucken</button></div>`);
+    $('#cancel').onclick = closeModal;
+    $('#lAll').onclick = () => document.querySelectorAll('[data-label]').forEach((c2) => { c2.checked = true; });
+    $('#lNone').onclick = () => document.querySelectorAll('[data-label]').forEach((c2) => { c2.checked = false; });
+    $('#doLabels').onclick = () => {
+      const ids = new Set([...document.querySelectorAll('[data-label]:checked')].map((c2) => Number(c2.dataset.label)));
+      const fmt = document.querySelector('[name=lfmt]:checked').value;
+      printLabels(all.filter((a) => ids.has(a.id)), fmt);
+    };
+  }
+  function printLabels(list, fmt) {
+    if (!list.length || !window.KSQR) return;
+    const big = fmt === 'gross';
+    const L = big ? { w: 105, h: 57, cols: 2, rows: 5, top: 4.5, left: 0, gapX: 0, gapY: 0, qr: 44, f1: 13, f2: 9.5 }
+      : { w: 48.5, h: 25.4, cols: 4, rows: 10, top: 21.5, left: 8, gapX: 0, gapY: 0, qr: 21, f1: 8.5, f2: 6.5 };
+    const per = L.cols * L.rows;
+    const pages = [];
+    for (let i = 0; i < list.length; i += per) pages.push(list.slice(i, i + per));
+    const cell = (a) => `<div class="l"><div class="q">${window.KSQR.svg(assetUrl(a), { margin: 1 })}</div><div class="t"><b>${esc(a.name)}</b>
+      <span>${esc([a.manufacturer, a.model].filter(Boolean).join(' '))}</span><span>${esc(a.location || '')}</span>${big && a.serial ? `<span>SN ${esc(a.serial)}</span>` : ''}<em>${esc(a.code)} · Kassensturz</em></div></div>`;
+    const css = `@page{size:A4;margin:0}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#000}
+      .p{width:210mm;height:297mm;padding:${L.top}mm 0 0 ${L.left}mm;display:grid;grid-template-columns:repeat(${L.cols},${L.w}mm);grid-auto-rows:${L.h}mm;page-break-after:always;align-content:start}
+      .l{display:flex;gap:2mm;align-items:center;padding:2mm 2.5mm;overflow:hidden;outline:0.1mm dashed #ccc}
+      .q{width:${L.qr}mm;height:${L.qr}mm;flex:none}.q svg{width:100%;height:100%}
+      .t{display:flex;flex-direction:column;min-width:0;line-height:1.15}.t b{font-size:${L.f1}pt;margin-bottom:0.6mm}.t span,.t em{font-size:${L.f2}pt;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.t em{color:#555;font-style:normal;margin-top:0.6mm}
+      @media screen{body{background:#eee}.p{background:#fff;margin:10px auto;box-shadow:0 2px 10px rgba(0,0,0,.2)}}`;
+    const html = `<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Kassensturz – QR-Etiketten</title><style>${css}</style></head><body>${pages.map((pg) => `<div class="p">${pg.map(cell).join('')}</div>`).join('')}</body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) { setSync('Pop-up blockiert – bitte für diese Seite erlauben', 'warn'); return; }
+    w.document.open(); w.document.write(html); w.document.close();
+    setTimeout(() => { try { w.focus(); w.print(); } catch (e) { /* Nutzer druckt selbst */ } }, 400);
+  }
+  function qrBaseDialog() {
+    openModal(`<h2>Adresse für QR-Codes</h2>
+      <div class="muted small">Unter dieser Adresse muss Kassensturz vom Handy aus erreichbar sein – am besten der feste Tailscale-Name eurer NAS (z. B. <span class="mono">https://ds723.tailxxxx.ts.net</span> oder <span class="mono">http://ds723:8099</span>). Wenn sich die Adresse später ändert, müssen die Aufkleber neu gedruckt werden.</div>
+      <div class="form" style="margin-top:10px"><label class="full">Adresse<input id="qrBase" value="${esc(S.qr_base || '')}" placeholder="${esc(location.origin)}"></label></div>
+      <div class="err" id="qbErr"></div>
+      <div class="actions"><span class="spacer"></span><button id="cancel">Abbrechen</button><button class="primary" id="saveQb">Speichern</button></div>`);
+    $('#cancel').onclick = closeModal;
+    $('#saveQb').onclick = async () => { try { await api('PUT', '/api/qr-base', { base: $('#qrBase').value.trim() }); closeModal(); await load(); } catch (e) { $('#qbErr').textContent = e.message; } };
   }
 
   // ---------- Beleg scannen ----------
@@ -1724,6 +2019,11 @@
         return;
       }
       if (t.dataset.inbox) { openInbox(Number(t.dataset.inbox)); return; }
+      if (t.id === 'addAsset') { assetEditDialog(null); return; }
+      if (t.id === 'assetFromPos') { fromPositionsDialog(); return; }
+      if (t.id === 'labels') { labelsDialog(); return; }
+      if (t.id === 'qrBaseEdit') { ev.preventDefault(); qrBaseDialog(); return; }
+      if (t.closest('[data-asset]') && !$('#modal').classList.contains('open')) { assetDialog(Number(t.closest('[data-asset]').dataset.asset)); return; }
       if (t.dataset.inboxdel) { if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Verwerfen?'; t.classList.add('danger'); return; } await mutate('POST', `/api/inbox/${t.dataset.inboxdel}/dismiss`); return; }
       if (t.id === 'mailTest' || t.id === 'mailRun') {
         const out = $('#mailOut'); out.className = 'small muted'; out.textContent = t.id === 'mailTest' ? 'Verbinde …' : 'Rufe ab …'; t.disabled = true;
@@ -1791,6 +2091,11 @@
       refreshSplitHint(prefix);
       return;
     }
+    if (t.id === 'hq') {
+      clearTimeout(qTimer);
+      qTimer = setTimeout(() => { houseFilt.q = t.value; const pos = t.selectionStart; render(); const n = $('#hq'); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }, 200);
+      return;
+    }
     if (t.id === 'fq') {
       clearTimeout(qTimer);
       qTimer = setTimeout(() => {
@@ -1807,6 +2112,8 @@
     if (t.id === 'fst') { filt.st = t.value; render(); return; }
     if (t.id === 'finc') { filt.inc = t.value; render(); return; }
     if (t.id === 'docFilter') { docFilter = t.value; render(); return; }
+    if (t.id === 'hcat') { houseFilt.cat = t.value; render(); return; }
+    if (t.id === 'hgroup') { houseFilt.group = t.value; render(); return; }
     if (t.dataset.cat) {
       const c = S.categories.find((x) => x.id === Number(t.dataset.cat)); if (!c) return;
       let v = t.value;
@@ -1906,9 +2213,19 @@
     let h = location.hash.replace('#', '');
     if (h === 'ausgaben') h = 'kosten';
     if (PLAN_TABS.includes(h)) { planTab = h; h = 'planung'; }
+    const teil = h.match(/^teil-([A-Z0-9]{4,12})$/i);
+    if (teil) { pendingTeil = teil[1].toUpperCase(); h = 'haus'; }
     tab = TABS.includes(h) ? h : 'uebersicht'; render();
   }
   window.addEventListener('hashchange', route);
+  let pendingTeil = null;
+  // QR-Code gescannt: Bauteil öffnen, sobald die Daten da sind
+  function openPendingTeil() {
+    if (!pendingTeil || !S.assets) return;
+    const a = S.assets.find((x) => x.code === pendingTeil);
+    pendingTeil = null;
+    if (a) assetDialog(a.id); else setSync('Bauteil zum QR-Code nicht gefunden', 'warn');
+  }
 
   start();
 })();

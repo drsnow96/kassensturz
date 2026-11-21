@@ -227,6 +227,54 @@ const MIGRATIONS = [
   CREATE INDEX idx_inbox_status ON inbox(status);
   CREATE INDEX idx_inbox_key ON inbox(message_key);
   `,
+
+  // 5 – Digitaler Hausordner: Bauteile/Geräte mit Dateien, Gewährleistung, Wartung und Protokoll; QR-Kurzcode
+  `
+  CREATE TABLE assets (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'sonstiges',
+    manufacturer TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    serial TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '',
+    installed TEXT NOT NULL DEFAULT '',
+    expense_id INTEGER REFERENCES expenses(id) ON DELETE SET NULL,
+    warranty_start TEXT NOT NULL DEFAULT '',
+    warranty_months INTEGER,
+    maintenance_months INTEGER,
+    maintenance_note TEXT NOT NULL DEFAULT '',
+    last_service TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE asset_files (
+    id INTEGER PRIMARY KEY,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'dokument',
+    filename TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    stored_name TEXT NOT NULL UNIQUE,
+    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    uploaded_at TEXT NOT NULL
+  );
+  CREATE TABLE asset_log (
+    id INTEGER PRIMARY KEY,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'wartung',
+    text TEXT NOT NULL DEFAULT '',
+    cost REAL,
+    by_user INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX idx_asset_files ON asset_files(asset_id);
+  CREATE INDEX idx_asset_log ON asset_log(asset_id);
+  `,
 ];
 
 function stamp() {
@@ -487,8 +535,50 @@ function state(user) {
     inbox: db.prepare("SELECT id, source, mail_from, subject, received_at, filename, mime, size, scan FROM inbox WHERE status = 'neu' ORDER BY id DESC LIMIT 100").all()
       .map((x) => ({ ...x, scan: parseJson(x.scan) })),
     mail: mailPublic(),
+    assets: assetsAll(),
+    qr_base: getMeta('qr_base') || '',
   };
 }
+
+// ---------------------------------------------------------------------------
+// Hausordner
+// ---------------------------------------------------------------------------
+const ASSET_CATS = ['heizung', 'lueftung', 'elektro', 'sanitaer', 'kueche', 'fenster', 'dach', 'aussen', 'sicherheit', 'sonstiges'];
+const ASSET_FILE_KINDS = ['anleitung', 'datenblatt', 'foto', 'rechnung', 'protokoll', 'dokument'];
+function assetsAll() {
+  const files = db.prepare('SELECT id, asset_id, kind, filename, mime, size, uploaded_at FROM asset_files ORDER BY id').all();
+  const logs = db.prepare('SELECT * FROM asset_log ORDER BY date DESC, id DESC').all();
+  const by = (arr) => { const m2 = new Map(); arr.forEach((x) => { if (!m2.has(x.asset_id)) m2.set(x.asset_id, []); m2.get(x.asset_id).push(x); }); return m2; };
+  const fm = by(files), lm = by(logs);
+  return db.prepare('SELECT * FROM assets ORDER BY location, name, id').all().map((a) => ({ ...a, files: fm.get(a.id) || [], log: lm.get(a.id) || [] }));
+}
+function newAssetCode() {
+  const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // ohne leicht verwechselbare Zeichen
+  for (;;) {
+    const c = Array.from(crypto.randomBytes(6), (b) => abc[b % abc.length]).join('');
+    if (!db.prepare('SELECT 1 FROM assets WHERE code = ?').get(c)) return c;
+  }
+}
+function assetFromBody(b) {
+  const name = str(b.name, 120);
+  if (!name) throw new HttpError(400, 'Bezeichnung fehlt');
+  const months = (v, label) => {
+    if (v === '' || v == null) return null;
+    const n = Number(v); if (!Number.isInteger(n) || n < 0 || n > 600) throw new HttpError(400, `${label}: ganze Monate (0–600)`);
+    return n || null;
+  };
+  let exp = b.expense_id == null || b.expense_id === '' ? null : Number(b.expense_id);
+  if (exp != null && !db.prepare('SELECT 1 FROM expenses WHERE id = ?').get(exp)) exp = null;
+  return {
+    name, category: ASSET_CATS.includes(b.category) ? b.category : 'sonstiges',
+    manufacturer: str(b.manufacturer, 120), model: str(b.model, 120), serial: str(b.serial, 120), location: str(b.location, 120),
+    installed: date(b.installed), expense_id: exp, warranty_start: date(b.warranty_start), warranty_months: months(b.warranty_months, 'Gewährleistung'),
+    maintenance_months: months(b.maintenance_months, 'Wartungsintervall'), maintenance_note: str(b.maintenance_note, 500),
+    last_service: date(b.last_service), notes: str(b.notes, 4000),
+  };
+}
+const ASSET_COLS = ['name', 'category', 'manufacturer', 'model', 'serial', 'location', 'installed', 'expense_id', 'warranty_start', 'warranty_months',
+  'maintenance_months', 'maintenance_note', 'last_service', 'notes'];
 
 // ---------------------------------------------------------------------------
 // E-Mail-Postfach (Einstellungen in meta, Passwort nie an den Browser)
@@ -586,6 +676,19 @@ function icsCalendar() {
       add(`gw-${e.id}-${end}`, end, `🛠 Gewährleistung endet: ${label}`, `${e.vendor || ''} ${e.warranty_note || ''}`.trim(), 14);
       const check = addMonthsIso(end, -3);
       add(`gwcheck-${e.id}-${check}`, check, `🔍 Begehung vor Gewährleistungsende: ${label}`, 'Mängel jetzt schriftlich anzeigen – Frist endet in 3 Monaten.', 7);
+    }
+  }
+  for (const a of db.prepare('SELECT * FROM assets').all()) {
+    const label = [a.name, a.location].filter(Boolean).join(' · ');
+    const base = a.last_service || a.installed;
+    if (a.maintenance_months && base) {
+      const due = addMonthsIso(base, a.maintenance_months);
+      add(`wt-${a.id}-${due}`, due, `🔧 Wartung: ${label}`, a.maintenance_note || 'Wartung laut Hausordner fällig', 7);
+    }
+    const wStart = a.warranty_start || a.installed;
+    if (a.warranty_months && wStart) {
+      const end = addMonthsIso(wStart, a.warranty_months);
+      add(`agw-${a.id}-${end}`, end, `🛠 Garantie/Gewährleistung endet: ${label}`, `${a.manufacturer} ${a.model}`.trim(), 30);
     }
   }
   return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Kassensturz//Hausbau//DE', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
@@ -1109,6 +1212,82 @@ async function api(req, res, url) {
   if (p === '/api/mail/run' && m === 'POST') {
     const stat = await runMail('manuell');
     return send(res, 200, stat);
+  }
+
+  // ---- Hausordner ----
+  if (p === '/api/assets' && m === 'POST') {
+    const a = assetFromBody(await readJson(req));
+    const t = nowIso();
+    const r = db.prepare(`INSERT INTO assets (code, ${ASSET_COLS.join(', ')}, created_by, created_at, updated_at)
+                          VALUES (?, ${ASSET_COLS.map(() => '?').join(', ')}, ?, ?, ?)`)
+      .run(newAssetCode(), ...ASSET_COLS.map((c) => a[c]), user.id, t, t);
+    bump();
+    return send(res, 200, { id: Number(r.lastInsertRowid) });
+  }
+  if ((mm = p.match(/^\/api\/assets\/(\d+)$/))) {
+    const id = idParam(mm[1]);
+    const cur = db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
+    if (!cur) throw new HttpError(404, 'Bauteil nicht gefunden');
+    if (m === 'PUT') {
+      const a = assetFromBody(await readJson(req));
+      db.prepare(`UPDATE assets SET ${ASSET_COLS.map((c) => c + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`).run(...ASSET_COLS.map((c) => a[c]), nowIso(), id);
+      bump(); return send(res, 200, { ok: true });
+    }
+    if (m === 'DELETE') {
+      const files = db.prepare('SELECT stored_name FROM asset_files WHERE asset_id = ?').all(id);
+      db.prepare('DELETE FROM assets WHERE id = ?').run(id);
+      files.forEach((f) => removeAttachmentFile(f.stored_name));
+      bump(); return send(res, 200, { ok: true });
+    }
+  }
+  if ((mm = p.match(/^\/api\/assets\/(\d+)\/files$/)) && m === 'POST') {
+    const id = idParam(mm[1]);
+    if (!db.prepare('SELECT 1 FROM assets WHERE id = ?').get(id)) throw new HttpError(404, 'Bauteil nicht gefunden');
+    let filename = 'datei';
+    try { filename = decodeURIComponent(String(req.headers['x-filename'] || 'datei')); } catch { /* Standard */ }
+    filename = path.basename(filename).replace(/[\u0000-\u001f"\\]/g, '').slice(0, 200) || 'datei';
+    const kind = ASSET_FILE_KINDS.includes(String(req.headers['x-kind'])) ? String(req.headers['x-kind']) : 'dokument';
+    const mime = str(req.headers['content-type'], 100).split(';')[0] || 'application/octet-stream';
+    const body = await readBody(req, MAX_UPLOAD);
+    if (!body.length) throw new HttpError(400, 'Leere Datei');
+    const stored = `${crypto.randomUUID()}${path.extname(filename).toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10)}`;
+    fs.writeFileSync(path.join(FILES_DIR, stored), body);
+    const r = db.prepare('INSERT INTO asset_files (asset_id, kind, filename, mime, size, stored_name, uploaded_by, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, kind, filename, mime, body.length, stored, user.id, nowIso());
+    bump(); return send(res, 200, { id: Number(r.lastInsertRowid) });
+  }
+  if ((mm = p.match(/^\/api\/asset-files\/(\d+)$/))) {
+    const f = db.prepare('SELECT * FROM asset_files WHERE id = ?').get(idParam(mm[1]));
+    if (!f) throw new HttpError(404, 'Datei nicht gefunden');
+    if (m === 'GET') return sendFile(res, path.join(FILES_DIR, path.basename(f.stored_name)), f.mime, f.filename);
+    if (m === 'DELETE') { db.prepare('DELETE FROM asset_files WHERE id = ?').run(f.id); removeAttachmentFile(f.stored_name); bump(); return send(res, 200, { ok: true }); }
+  }
+  if ((mm = p.match(/^\/api\/assets\/(\d+)\/log$/)) && m === 'POST') {
+    const id = idParam(mm[1]);
+    const a = db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
+    if (!a) throw new HttpError(404, 'Bauteil nicht gefunden');
+    const b = await readJson(req);
+    const d = date(b.date) || new Date().toISOString().slice(0, 10);
+    const kind = ['wartung', 'reparatur', 'pruefung', 'notiz'].includes(b.kind) ? b.kind : 'wartung';
+    const cost = b.cost === '' || b.cost == null ? null : amount(b.cost);
+    db.prepare('INSERT INTO asset_log (asset_id, date, kind, text, cost, by_user, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, d, kind, str(b.text, 2000), cost, user.id, nowIso());
+    if ((kind === 'wartung' || kind === 'pruefung') && (!a.last_service || d > a.last_service)) db.prepare('UPDATE assets SET last_service = ?, updated_at = ? WHERE id = ?').run(d, nowIso(), id);
+    bump(); return send(res, 200, { ok: true });
+  }
+  if ((mm = p.match(/^\/api\/asset-log\/(\d+)$/)) && m === 'DELETE') {
+    const l = db.prepare('SELECT * FROM asset_log WHERE id = ?').get(idParam(mm[1]));
+    if (!l) throw new HttpError(404, 'Eintrag nicht gefunden');
+    db.prepare('DELETE FROM asset_log WHERE id = ?').run(l.id);
+    const last = db.prepare("SELECT MAX(date) AS d FROM asset_log WHERE asset_id = ? AND kind IN ('wartung','pruefung')").get(l.asset_id).d || '';
+    db.prepare('UPDATE assets SET last_service = ? WHERE id = ?').run(last, l.asset_id);
+    bump(); return send(res, 200, { ok: true });
+  }
+  if (p === '/api/qr-base' && m === 'PUT') {
+    const b = await readJson(req);
+    const v = str(b.base, 200).replace(/\/+$/, '');
+    if (v && !/^https?:\/\/[^\s/]+(:\d+)?(\/[^\s]*)?$/i.test(v)) throw new HttpError(400, 'Adresse bitte mit http:// oder https:// angeben');
+    setMeta('qr_base', v);
+    bump(); return send(res, 200, { ok: true });
   }
 
   // ---- Kalender-Abo ----
